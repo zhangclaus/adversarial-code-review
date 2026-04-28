@@ -72,6 +72,9 @@ class ClaudeCliAdapter:
             return None
         payload = json.loads(stdout)
         if isinstance(payload, dict) and "result" in payload:
+            structured_output = payload.get("structured_output")
+            if isinstance(structured_output, dict):
+                return structured_output
             result = payload["result"]
             if isinstance(result, dict):
                 return result

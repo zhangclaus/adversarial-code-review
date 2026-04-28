@@ -76,3 +76,32 @@ def test_execute_keeps_nonzero_claude_envelope_as_execution_failure(tmp_path: Pa
     assert result.exit_code == 1
     assert result.structured_output is None
     assert result.parse_error is None
+
+
+def test_execute_reads_structured_output_field_from_claude_envelope(tmp_path: Path):
+    def fake_runner(command: list[str], **kwargs) -> CompletedProcess[str]:
+        return CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='{"type":"result","result":"","structured_output":{"summary":"done","status":"completed","changed_files":[],"verification_commands":[],"notes_for_supervisor":[]}}',
+            stderr="",
+        )
+
+    adapter = ClaudeCliAdapter(runner=fake_runner)
+    compiled = CompiledPrompt(
+        system_prompt="system",
+        user_prompt="goal",
+        schema={"type": "object"},
+        metadata={"task_id": "task-structured-output"},
+    )
+    allocation = WorkspaceAllocation(
+        workspace_id="workspace-1",
+        path=tmp_path,
+        mode=WorkspaceMode.READONLY,
+        writable=False,
+    )
+
+    result = adapter.execute(compiled, allocation)
+
+    assert result.structured_output["summary"] == "done"
+    assert result.parse_error is None
