@@ -38,3 +38,17 @@ def test_guard_write_targets_blocks_readonly_and_protected_paths(tmp_path: Path)
     assert shared_preflight.allowed is False
     assert "shared workspace" in shared_preflight.reason
     assert shared_write.allowed is True
+
+
+def test_guard_write_targets_allows_readonly_when_no_paths_changed(tmp_path: Path):
+    gate = PolicyGate()
+    readonly_allocation = WorkspaceAllocation(
+        workspace_id="readonly",
+        path=tmp_path,
+        mode=WorkspaceMode.READONLY,
+        writable=False,
+    )
+
+    decision = gate.guard_write_targets(readonly_allocation, [])
+
+    assert decision.allowed is True

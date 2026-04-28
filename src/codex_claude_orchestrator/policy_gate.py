@@ -33,6 +33,8 @@ class PolicyGate:
         *,
         shared_write_allowed: bool = False,
     ) -> PolicyDecision:
+        if not paths:
+            return PolicyDecision(allowed=True, reason=None)
         if allocation.mode is WorkspaceMode.READONLY:
             return PolicyDecision(allowed=False, reason="readonly workspace cannot be modified")
         if allocation.mode is WorkspaceMode.SHARED and not shared_write_allowed:
