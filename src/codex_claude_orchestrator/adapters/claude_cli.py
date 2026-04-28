@@ -45,12 +45,15 @@ class ClaudeCliAdapter:
             check=False,
         )
         stdout = completed.stdout or ""
-        try:
-            structured_output = self._parse_structured_output(stdout)
-            parse_error = None
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        structured_output = None
+        parse_error = None
+        if completed.returncode == 0:
+            try:
+                structured_output = self._parse_structured_output(stdout)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                parse_error = str(exc)
+        else:
             structured_output = None
-            parse_error = str(exc)
         changed_files = []
         if isinstance(structured_output, dict):
             changed_files = list(structured_output.get("changed_files") or [])
