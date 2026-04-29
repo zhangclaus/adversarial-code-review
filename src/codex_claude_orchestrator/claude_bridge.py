@@ -259,12 +259,23 @@ class ClaudeBridge:
         self._append_log_challenge(resolved_bridge_id, challenge)
 
         sent_turn = None
+        send_error = None
         if send:
-            send_result = self.send(repo_root=repo, bridge_id=resolved_bridge_id, message=repair_goal)
-            updated = send_result["bridge"]
-            sent_turn = send_result["latest_turn"]
+            try:
+                send_result = self.send(repo_root=repo, bridge_id=resolved_bridge_id, message=repair_goal)
+            except Exception as exc:  # noqa: BLE001 - preserve persisted challenge for Codex recovery.
+                send_error = str(exc)
+                self._append_log_status(resolved_bridge_id, f"Challenge repair send failed: {send_error}")
+            else:
+                updated = send_result["bridge"]
+                sent_turn = send_result["latest_turn"]
 
-        return {"bridge": updated, "challenge": challenge.to_dict(), "latest_turn": sent_turn}
+        return {
+            "bridge": updated,
+            "challenge": challenge.to_dict(),
+            "latest_turn": sent_turn,
+            "send_error": send_error,
+        }
 
     def accept(self, *, repo_root: Path, bridge_id: str | None, summary: str) -> dict[str, Any]:
         return self._finalize_supervised_bridge(
@@ -535,8 +546,11 @@ class ClaudeBridge:
         latest_challenge: dict[str, Any] | None,
     ) -> dict[str, bool]:
         verification_failed = bool(latest_verification and not latest_verification.get("passed"))
+        is_terminal = record.get("status") in ("accepted", "needs_human")
         challenge_pending = bool(
-            latest_challenge and record.get("latest_challenge_id") == latest_challenge.get("challenge_id")
+            not is_terminal
+            and latest_challenge
+            and record.get("latest_challenge_id") == latest_challenge.get("challenge_id")
         )
         return {
             "needs_codex_review": record.get("status") in ("active", "failed", "needs_human"),
@@ -597,6 +611,18 @@ class ClaudeBridge:
         resolved_bridge_id = self._resolve_bridge_id(bridge_id)
         record = self._read_record(resolved_bridge_id)
         self._require_supervised(record)
+        current_status = str(record.get("status") or "")
+        terminal_statuses = {"accepted", "needs_human"}
+        if current_status == bridge_status:
+            return {
+                "bridge": record,
+                "session": self._session_recorder.read_session(str(record["session_id"]))["session"],
+            }
+        if current_status in terminal_statuses:
+            raise ValueError(
+                f"bridge {resolved_bridge_id} is already finalized as {current_status}; "
+                f"cannot finalize as {bridge_status}"
+            )
         self._session_recorder.finalize_session(
             str(record["session_id"]),
             status,

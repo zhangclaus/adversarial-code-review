@@ -490,6 +490,97 @@ def test_bridge_challenge_send_records_challenge_and_sends_repair_goal(tmp_path:
     assert snapshot["suggested_next"]["challenge_pending"] is True
 
 
+def test_bridge_challenge_send_failure_returns_recovery_signal(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append(list(command))
+        if len(calls) == 2:
+            raise RuntimeError("send failed")
+        return CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"第一轮。"}',
+            stderr="",
+        )
+
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=fake_runner,
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-send-failure",
+        turn_id_factory=lambda: "turn-start",
+        session_id_factory=lambda: "session-send-failure",
+        task_id_factory=lambda: "task-send-failure",
+        trace_id_factory=lambda: "trace-start",
+        challenge_id_factory=lambda: "challenge-send-failure",
+    )
+
+    bridge.start(repo_root=repo_root, goal="实现功能", workspace_mode="shared", supervised=True)
+    result = bridge.challenge(
+        repo_root=repo_root,
+        bridge_id=None,
+        summary="缺少验证证据",
+        repair_goal="补充测试并汇报验证结果",
+        send=True,
+    )
+
+    assert result["challenge"]["challenge_id"] == "challenge-send-failure"
+    assert result["latest_turn"] is None
+    assert "send failed" in result["send_error"]
+    assert result["bridge"]["latest_challenge_id"] == "challenge-send-failure"
+    details = recorder.read_session("session-send-failure")
+    assert details["challenges"][0]["challenge_id"] == "challenge-send-failure"
+    log_text = (repo_root / ".orchestrator" / "claude-bridge" / "bridge-send-failure" / "bridge.log").read_text(
+        encoding="utf-8"
+    )
+    assert "Challenge repair send failed" in log_text
+    assert "send failed" in log_text
+
+
+def test_bridge_terminal_status_suppresses_pending_challenge(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=lambda command, **kwargs: CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"完成。"}',
+            stderr="",
+        ),
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-terminal-challenge",
+        turn_id_factory=lambda: "turn-start",
+        session_id_factory=lambda: "session-terminal-challenge",
+        task_id_factory=lambda: "task-terminal-challenge",
+        trace_id_factory=lambda: "trace-terminal-challenge",
+        challenge_id_factory=lambda: "challenge-terminal",
+    )
+
+    bridge.start(repo_root=repo_root, goal="最终确认", workspace_mode="readonly", supervised=True)
+    bridge.challenge(
+        repo_root=repo_root,
+        bridge_id=None,
+        summary="缺少验证证据",
+        repair_goal="补充测试并汇报验证结果",
+    )
+
+    before_accept = bridge.status(repo_root=repo_root, bridge_id=None)
+    assert before_accept["suggested_next"]["challenge_pending"] is True
+
+    bridge.accept(repo_root=repo_root, bridge_id=None, summary="Codex reviewed and accepted")
+
+    after_accept = bridge.status(repo_root=repo_root, bridge_id=None)
+    assert after_accept["bridge"]["latest_challenge_id"] == "challenge-terminal"
+    assert after_accept["suggested_next"]["challenge_pending"] is False
+
+
 def test_bridge_accept_and_needs_human_finalize_supervised_session(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -517,12 +608,20 @@ def test_bridge_accept_and_needs_human_finalize_supervised_session(tmp_path: Pat
     assert accepted["bridge"]["status"] == "accepted"
     assert recorder.read_session("session-final")["session"]["status"] == "accepted"
 
-    blocked = bridge.needs_human(repo_root=repo_root, bridge_id=None, summary="Need user decision")
+    accepted_again = bridge.accept(repo_root=repo_root, bridge_id=None, summary="Codex reviewed and accepted again")
+    assert accepted_again["bridge"]["status"] == "accepted"
+    assert recorder.read_session("session-final")["session"]["status"] == "accepted"
 
-    assert blocked["bridge"]["status"] == "needs_human"
+    try:
+        bridge.needs_human(repo_root=repo_root, bridge_id=None, summary="Need user decision")
+    except ValueError as exc:
+        assert "already finalized" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
     details = recorder.read_session("session-final")
-    assert details["session"]["status"] == "needs_human"
-    assert details["final_report"]["final_summary"] == "Need user decision"
+    assert details["session"]["status"] == "accepted"
+    assert details["final_report"]["final_summary"] == "Codex reviewed and accepted"
 
 
 def test_bridge_challenge_requires_supervised_bridge(tmp_path: Path):
