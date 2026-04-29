@@ -9,7 +9,18 @@ from subprocess import CalledProcessError, CompletedProcess
 from typing import Any
 from uuid import uuid4
 
-from codex_claude_orchestrator.models import utc_now
+from codex_claude_orchestrator.models import (
+    EvaluationOutcome,
+    OutputTrace,
+    SessionRecord,
+    TurnPhase,
+    TurnRecord,
+    WorkerResult,
+    WorkspaceMode,
+    utc_now,
+)
+from codex_claude_orchestrator.result_evaluator import ResultEvaluator
+from codex_claude_orchestrator.session_recorder import SessionRecorder
 
 
 CommandRunner = Callable[..., CompletedProcess[str]]
@@ -22,16 +33,30 @@ class ClaudeBridge:
         *,
         runner: CommandRunner | None = None,
         visual_runner: CommandRunner | None = None,
+        session_recorder: SessionRecorder | None = None,
+        verification_runner: Any | None = None,
+        result_evaluator: ResultEvaluator | None = None,
         bridge_id_factory: Callable[[], str] | None = None,
         turn_id_factory: Callable[[], str] | None = None,
+        session_id_factory: Callable[[], str] | None = None,
+        task_id_factory: Callable[[], str] | None = None,
+        trace_id_factory: Callable[[], str] | None = None,
+        challenge_id_factory: Callable[[], str] | None = None,
     ):
         self._state_root = state_root
         self._bridges_root = state_root / "claude-bridge"
         self._bridges_root.mkdir(parents=True, exist_ok=True)
         self._runner = runner or subprocess.run
         self._visual_runner = visual_runner or subprocess.run
+        self._session_recorder = session_recorder or SessionRecorder(state_root)
+        self._verification_runner = verification_runner
+        self._result_evaluator = result_evaluator or ResultEvaluator()
         self._bridge_id_factory = bridge_id_factory or (lambda: f"bridge-{uuid4().hex}")
         self._turn_id_factory = turn_id_factory or (lambda: f"turn-{uuid4().hex}")
+        self._session_id_factory = session_id_factory or (lambda: f"session-{uuid4().hex}")
+        self._task_id_factory = task_id_factory or (lambda: f"task-{uuid4().hex}")
+        self._trace_id_factory = trace_id_factory or (lambda: f"trace-{uuid4().hex}")
+        self._challenge_id_factory = challenge_id_factory or (lambda: f"challenge-{uuid4().hex}")
 
     def start(
         self,
@@ -41,10 +66,12 @@ class ClaudeBridge:
         workspace_mode: str = "readonly",
         visual: str = "none",
         dry_run: bool = False,
+        supervised: bool = False,
     ) -> dict[str, Any]:
         repo = self._resolve_repo(repo_root)
         bridge_id = self._bridge_id_factory()
         created_at = utc_now()
+        supervised_session = self._create_supervised_session(repo, goal, workspace_mode) if supervised else None
         record = {
             "bridge_id": bridge_id,
             "repo": str(repo),
@@ -56,6 +83,17 @@ class ClaudeBridge:
             "created_at": created_at,
             "updated_at": created_at,
         }
+        if supervised_session:
+            record.update(
+                {
+                    "supervised": True,
+                    "session_id": supervised_session.session_id,
+                    "root_task_id": supervised_session.root_task_id,
+                    "latest_turn_id": None,
+                    "latest_verification_status": None,
+                    "latest_challenge_id": None,
+                }
+            )
         bridge_dir = self._bridge_dir(bridge_id)
         bridge_dir.mkdir(parents=True, exist_ok=False)
         self._write_record(bridge_id, record)
@@ -77,6 +115,8 @@ class ClaudeBridge:
             dry_run=dry_run,
         )
         record = self._advance_record(record, turn, dry_run=dry_run)
+        if record.get("supervised"):
+            self._mirror_bridge_turn(record, turn)
         self._write_record(bridge_id, record)
         return {"bridge": record, "latest_turn": turn, "visual": visual_result}
 
@@ -105,6 +145,8 @@ class ClaudeBridge:
             dry_run=dry_run,
         )
         record = self._advance_record(record, turn, dry_run=dry_run)
+        if record.get("supervised"):
+            self._mirror_bridge_turn(record, turn)
         self._write_record(resolved_bridge_id, record)
         self._write_latest(resolved_bridge_id)
         return {"bridge": record, "latest_turn": turn}
@@ -274,7 +316,93 @@ class ClaudeBridge:
             updated["status"] = "active" if turn["returncode"] == 0 else "failed"
         updated["turn_count"] = int(updated["turn_count"]) + 1
         updated["updated_at"] = turn["created_at"]
+        if updated.get("supervised"):
+            updated["latest_turn_id"] = turn["turn_id"]
         return updated
+
+    def _create_supervised_session(self, repo: Path, goal: str, workspace_mode: str) -> SessionRecord:
+        session = SessionRecord(
+            session_id=self._session_id_factory(),
+            root_task_id=self._task_id_factory(),
+            repo=str(repo),
+            goal=goal,
+            assigned_agent="claude",
+            workspace_mode=WorkspaceMode(workspace_mode),
+            max_rounds=1,
+        )
+        self._session_recorder.start_session(session)
+        return session
+
+    def _mirror_bridge_turn(self, record: dict[str, Any], turn: dict[str, Any]) -> None:
+        session_id = str(record["session_id"])
+        turn_id = str(turn["turn_id"])
+        task_id = str(record["root_task_id"])
+        stdout_artifact = self._session_recorder.write_text_artifact(
+            session_id,
+            f"bridge/{turn_id}/stdout.txt",
+            str(turn.get("stdout") or ""),
+        )
+        stderr_artifact = self._session_recorder.write_text_artifact(
+            session_id,
+            f"bridge/{turn_id}/stderr.txt",
+            str(turn.get("stderr") or ""),
+        )
+        evaluation = self._evaluate_bridge_turn(turn)
+        bridge_turn = TurnRecord(
+            turn_id=turn_id,
+            session_id=session_id,
+            round_index=int(record["turn_count"]),
+            phase=TurnPhase.EXECUTE,
+            task_id=task_id,
+            run_id=turn_id,
+            from_agent="claude",
+            to_agent="codex",
+            message=str(turn.get("message") or ""),
+            decision=evaluation.next_action.value,
+            summary=evaluation.summary,
+            payload={"bridge_turn": turn, "evaluation": evaluation.to_dict()},
+            created_at=str(turn["created_at"]),
+        )
+        self._session_recorder.append_turn(session_id, bridge_turn)
+        trace = OutputTrace(
+            trace_id=self._trace_id_factory(),
+            session_id=session_id,
+            turn_id=turn_id,
+            run_id=turn_id,
+            task_id=task_id,
+            output_summary=evaluation.summary,
+            agent="claude",
+            adapter="ClaudeBridge",
+            command=list(turn.get("command") or []),
+            stdout_artifact=str(stdout_artifact),
+            stderr_artifact=str(stderr_artifact),
+            display_summary=str(turn.get("result_text") or evaluation.summary),
+            artifact_paths=[str(stdout_artifact), str(stderr_artifact)],
+            evaluation=evaluation,
+            created_at=str(turn["created_at"]),
+        )
+        self._session_recorder.append_output_trace(session_id, trace)
+
+    def _evaluate_bridge_turn(self, turn: dict[str, Any]) -> EvaluationOutcome:
+        result_text = str(turn.get("result_text") or "")
+        parse_error = turn.get("parse_error")
+        structured_output = None
+        if turn["returncode"] == 0 and not parse_error and result_text.strip():
+            structured_output = {
+                "summary": result_text,
+                "status": "completed",
+                "completed": True,
+            }
+        return self._result_evaluator.evaluate(
+            WorkerResult(
+                raw_output=str(turn.get("stdout") or ""),
+                stdout=str(turn.get("stdout") or ""),
+                stderr=str(turn.get("stderr") or ""),
+                exit_code=int(turn["returncode"]),
+                structured_output=structured_output,
+                parse_error=str(parse_error) if parse_error else None,
+            )
+        )
 
     def _mark_record_running(self, record: dict[str, Any]) -> dict[str, Any]:
         updated = dict(record)

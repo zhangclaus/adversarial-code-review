@@ -4,6 +4,7 @@ from pathlib import Path
 from subprocess import CalledProcessError, CompletedProcess
 
 from codex_claude_orchestrator.claude_bridge import ClaudeBridge
+from codex_claude_orchestrator.session_recorder import SessionRecorder
 
 
 def test_bridge_start_runs_claude_and_records_latest_session(tmp_path: Path):
@@ -249,3 +250,55 @@ def test_bridge_send_requires_claude_session_for_real_send(tmp_path: Path):
         assert "no Claude session id" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_bridge_start_supervised_creates_session_and_mirrors_initial_turn(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+
+    def fake_runner(command, **kwargs):
+        return CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"初始实现完成。"}',
+            stderr="",
+        )
+
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=fake_runner,
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-supervised",
+        turn_id_factory=lambda: "turn-start",
+        session_id_factory=lambda: "session-bridge",
+        task_id_factory=lambda: "task-bridge",
+        trace_id_factory=lambda: "trace-start",
+    )
+
+    result = bridge.start(
+        repo_root=repo_root,
+        goal="实现 Codex 监督 bridge",
+        workspace_mode="shared",
+        supervised=True,
+    )
+
+    assert result["bridge"]["supervised"] is True
+    assert result["bridge"]["session_id"] == "session-bridge"
+    assert result["bridge"]["latest_turn_id"] == "turn-start"
+    assert result["latest_turn"]["result_text"] == "初始实现完成。"
+
+    details = recorder.read_session("session-bridge")
+    assert details["session"]["goal"] == "实现 Codex 监督 bridge"
+    assert details["session"]["assigned_agent"] == "claude"
+    assert details["session"]["workspace_mode"] == "shared"
+    assert details["turns"][0]["turn_id"] == "turn-start"
+    assert details["turns"][0]["phase"] == "execute"
+    assert details["turns"][0]["from_agent"] == "claude"
+    assert details["turns"][0]["to_agent"] == "codex"
+    assert details["output_traces"][0]["trace_id"] == "trace-start"
+    assert details["output_traces"][0]["run_id"] == "turn-start"
+    assert details["output_traces"][0]["command"][0:2] == ["claude", "--print"]
+    assert details["output_traces"][0]["stdout_artifact"].endswith("bridge/turn-start/stdout.txt")
+    assert details["output_traces"][0]["stderr_artifact"].endswith("bridge/turn-start/stderr.txt")
+    assert details["output_traces"][0]["evaluation"]["accepted"] is True
