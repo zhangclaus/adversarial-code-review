@@ -4,8 +4,19 @@ import json
 from pathlib import Path
 
 from codex_claude_orchestrator.cli import main
-from codex_claude_orchestrator.models import EvaluationOutcome, NextAction, RunRecord, TaskRecord, WorkspaceMode
+from codex_claude_orchestrator.models import (
+    EvaluationOutcome,
+    LearningNote,
+    NextAction,
+    RunRecord,
+    SessionRecord,
+    SessionStatus,
+    TaskRecord,
+    WorkspaceMode,
+)
 from codex_claude_orchestrator.run_recorder import RunRecorder
+from codex_claude_orchestrator.session_recorder import SessionRecorder
+from codex_claude_orchestrator.skill_evolution import SkillEvolution
 
 
 def test_build_parser_exposes_dispatch_subcommand():
@@ -16,12 +27,43 @@ def test_build_parser_exposes_dispatch_subcommand():
     assert "dispatch" in subparsers_action.choices
 
 
+def test_build_parser_exposes_v2_session_and_skill_commands():
+    from codex_claude_orchestrator.cli import build_parser
+
+    parser = build_parser()
+    subparsers_action = next(action for action in parser._actions if action.dest == "command")
+
+    assert "session" in subparsers_action.choices
+    assert "sessions" in subparsers_action.choices
+    assert "skills" in subparsers_action.choices
+
+
 class FakeSupervisor:
     def dispatch(self, task, source_repo):
         return EvaluationOutcome(
             accepted=True,
             next_action=NextAction.ACCEPT,
             summary=f"accepted {task.goal}",
+        )
+
+
+class FakeSessionEngine:
+    def __init__(self):
+        self.calls = []
+
+    def start(self, **kwargs):
+        self.calls.append(kwargs)
+        return SessionRecord(
+            session_id="session-cli",
+            root_task_id="task-session-cli",
+            repo=str(kwargs["repo_root"]),
+            goal=kwargs["goal"],
+            assigned_agent=kwargs["assigned_agent"],
+            status=SessionStatus.ACCEPTED,
+            workspace_mode=kwargs["workspace_mode"],
+            max_rounds=kwargs["max_rounds"],
+            verification_commands=kwargs["verification_commands"],
+            final_summary="session accepted",
         )
 
 
@@ -54,6 +96,45 @@ def test_main_dispatch_prints_json_summary(tmp_path: Path, monkeypatch):
     assert exit_code == 0
     assert payload["accepted"] is True
     assert payload["summary"] == "accepted Inspect the repository"
+
+
+def test_main_session_start_prints_json_summary(tmp_path: Path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    fake_engine = FakeSessionEngine()
+
+    monkeypatch.setattr(
+        "codex_claude_orchestrator.cli.build_session_engine",
+        lambda repo_root: fake_engine,
+    )
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        exit_code = main(
+            [
+                "session",
+                "start",
+                "--goal",
+                "Implement V2",
+                "--repo",
+                str(repo_root),
+                "--workspace-mode",
+                "isolated",
+                "--max-rounds",
+                "2",
+                "--verification-command",
+                "pytest -q",
+            ]
+        )
+
+    payload = json.loads(stdout.getvalue())
+    assert exit_code == 0
+    assert payload["session_id"] == "session-cli"
+    assert payload["status"] == "accepted"
+    assert payload["final_summary"] == "session accepted"
+    assert fake_engine.calls[0]["goal"] == "Implement V2"
+    assert fake_engine.calls[0]["max_rounds"] == 2
+    assert fake_engine.calls[0]["verification_commands"] == ["pytest -q"]
 
 
 def test_agents_list_prints_configured_profiles():
@@ -152,6 +233,111 @@ def test_runs_show_prints_recorded_run_details(tmp_path: Path):
     assert payload["run"]["run_id"] == "run-cli-show"
     assert payload["task"]["goal"] == "Show this run"
     assert "artifacts" in payload
+
+
+def test_sessions_list_and_show_print_recorded_session_details(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+    session = SessionRecord(
+        session_id="session-cli-list",
+        root_task_id="task-session-cli",
+        repo=str(repo_root),
+        goal="Show session",
+        assigned_agent="claude",
+    )
+    recorder.start_session(session)
+    recorder.finalize_session(session.session_id, SessionStatus.ACCEPTED, "accepted")
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        list_exit = main(["sessions", "list", "--repo", str(repo_root)])
+    list_payload = json.loads(stdout.getvalue())
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        show_exit = main(["sessions", "show", "--repo", str(repo_root), "--session-id", session.session_id])
+    show_payload = json.loads(stdout.getvalue())
+
+    assert list_exit == 0
+    assert list_payload["sessions"][0]["session_id"] == "session-cli-list"
+    assert list_payload["sessions"][0]["summary"] == "accepted"
+    assert show_exit == 0
+    assert show_payload["session"]["session_id"] == "session-cli-list"
+    assert show_payload["final_report"]["status"] == "accepted"
+
+
+def test_skills_lifecycle_commands_print_json(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    evolution = SkillEvolution(repo_root / ".orchestrator")
+    record = evolution.create_pending_skill(
+        LearningNote(
+            note_id="learning-cli",
+            session_id="session-cli",
+            challenge_ids=["challenge-cli"],
+            summary="Require verification before completion.",
+            proposed_skill_name="Verification Discipline",
+            trigger_conditions=["session retry"],
+            evidence_summary="A challenge required stronger verification.",
+            confidence=0.7,
+        )
+    )
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        list_exit = main(["skills", "list", "--repo", str(repo_root)])
+    list_payload = json.loads(stdout.getvalue())
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        show_exit = main(["skills", "show", "--repo", str(repo_root), "--skill-id", record.name])
+    show_payload = json.loads(stdout.getvalue())
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        approve_exit = main(["skills", "approve", "--repo", str(repo_root), "--skill-id", record.name])
+    approve_payload = json.loads(stdout.getvalue())
+
+    assert list_exit == 0
+    assert list_payload["skills"][0]["name"] == "verification-discipline"
+    assert list_payload["skills"][0]["status"] == "pending"
+    assert show_exit == 0
+    assert show_payload["record"]["name"] == "verification-discipline"
+    assert "## Verification" in show_payload["skill"]
+    assert approve_exit == 0
+    assert approve_payload["status"] == "active"
+
+
+def test_skills_reject_command_prints_json(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    evolution = SkillEvolution(repo_root / ".orchestrator")
+    record = evolution.create_pending_skill(
+        LearningNote(
+            note_id="learning-reject",
+            session_id="session-cli",
+            challenge_ids=["challenge-cli"],
+            summary="Too broad.",
+            proposed_skill_name="Too Broad",
+        )
+    )
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        exit_code = main(
+            [
+                "skills",
+                "reject",
+                "--repo",
+                str(repo_root),
+                "--skill-id",
+                record.name,
+                "--reason",
+                "too broad",
+            ]
+        )
+
+    payload = json.loads(stdout.getvalue())
+    assert exit_code == 0
+    assert payload["status"] == "rejected"
 
 
 class FakeWorkerResult:
