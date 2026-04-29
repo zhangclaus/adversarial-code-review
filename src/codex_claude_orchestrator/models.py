@@ -57,6 +57,45 @@ class NextAction(StrEnum):
     PROMOTE_TO_SHARED_MERGE = "promote_to_shared_merge"
 
 
+class SessionStatus(StrEnum):
+    RUNNING = "running"
+    ACCEPTED = "accepted"
+    NEEDS_HUMAN = "needs_human"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+
+
+class TurnPhase(StrEnum):
+    EXECUTE = "execute"
+    LIGHT_VERIFY = "light_verify"
+    CHALLENGE = "challenge"
+    REPAIR = "repair"
+    FINAL_VERIFY = "final_verify"
+
+
+class ChallengeType(StrEnum):
+    COUNTEREXAMPLE = "counterexample"
+    MISSING_TEST = "missing_test"
+    SCOPE_RISK = "scope_risk"
+    POLICY_RISK = "policy_risk"
+    QUALITY_RISK = "quality_risk"
+
+
+class VerificationKind(StrEnum):
+    COMMAND = "command"
+    POLICY = "policy"
+    DIFF = "diff"
+    GENERATED_CHECK = "generated_check"
+    HUMAN = "human"
+
+
+class SkillStatus(StrEnum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    REJECTED = "rejected"
+    ARCHIVED = "archived"
+
+
 @dataclass(slots=True)
 class TaskRecord:
     task_id: str
@@ -171,6 +210,163 @@ class EvaluationOutcome:
     summary: str
     failure_class: FailureClass | None = None
     needs_human: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class SessionRecord:
+    session_id: str
+    root_task_id: str
+    goal: str
+    assigned_agent: str
+    repo: str = ""
+    status: SessionStatus = SessionStatus.RUNNING
+    workspace_mode: WorkspaceMode = WorkspaceMode.ISOLATED
+    max_rounds: int = 1
+    current_round: int = 0
+    acceptance_criteria: list[str] = field(default_factory=list)
+    failure_criteria: list[str] = field(default_factory=list)
+    verification_commands: list[str] = field(default_factory=list)
+    generated_checks: list[str] = field(default_factory=list)
+    active_skill_ids: list[str] = field(default_factory=list)
+    final_summary: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    ended_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class TurnRecord:
+    turn_id: str
+    session_id: str
+    round_index: int
+    phase: TurnPhase
+    task_id: str
+    run_id: str | None = None
+    from_agent: str = ""
+    to_agent: str = ""
+    message: str = ""
+    decision: str = ""
+    summary: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class OutputTrace:
+    trace_id: str
+    session_id: str
+    turn_id: str
+    run_id: str
+    task_id: str
+    output_summary: str
+    agent: str = ""
+    adapter: str = ""
+    prompt_artifact: str | None = None
+    command: list[str] = field(default_factory=list)
+    stdout_artifact: str | None = None
+    stderr_artifact: str | None = None
+    structured_output_artifact: str | None = None
+    policy_summary: str = ""
+    display_summary: str = ""
+    artifact_paths: list[str] = field(default_factory=list)
+    changed_files: list[str] = field(default_factory=list)
+    evaluation: EvaluationOutcome | None = None
+    created_at: str = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class ChallengeRecord:
+    challenge_id: str
+    session_id: str
+    turn_id: str
+    round_index: int
+    challenge_type: ChallengeType
+    summary: str
+    question: str = ""
+    expected_evidence: str = ""
+    severity: int = 1
+    evidence: dict[str, Any] = field(default_factory=dict)
+    repair_goal: str = ""
+    created_at: str = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class VerificationRecord:
+    verification_id: str
+    session_id: str
+    turn_id: str
+    kind: VerificationKind
+    passed: bool
+    summary: str
+    command: str | None = None
+    exit_code: int | None = None
+    stdout_artifact: str | None = None
+    stderr_artifact: str | None = None
+    created_at: str = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class LearningNote:
+    note_id: str
+    session_id: str
+    challenge_ids: list[str]
+    summary: str
+    proposed_skill_name: str | None = None
+    learning_id: str | None = None
+    source_turn_ids: list[str] = field(default_factory=list)
+    pattern: str = ""
+    trigger_conditions: list[str] = field(default_factory=list)
+    evidence_summary: str = ""
+    confidence: float = 0.0
+    created_at: str = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class SkillRecord:
+    skill_id: str
+    name: str
+    status: SkillStatus
+    source_session_id: str
+    learning_note_id: str
+    path: str | Path
+    version: str = "0.1.0"
+    trigger_conditions: list[str] = field(default_factory=list)
+    validation_summary: str = ""
+    approval_mode: str = "human"
+    summary: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _normalize(self)
+
+
+@dataclass(slots=True)
+class DispatchReport:
+    run_id: str
+    task_id: str
+    evaluation: EvaluationOutcome
 
     def to_dict(self) -> dict[str, Any]:
         return _normalize(self)
