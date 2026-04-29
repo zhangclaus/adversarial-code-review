@@ -48,21 +48,29 @@ class SessionRecorder:
         learning.append(learning_note.to_dict())
         self._write_json(learning_path, learning)
 
-    def finalize_session(self, session_id: str, status: SessionStatus, final_summary: str) -> None:
+    def finalize_session(
+        self,
+        session_id: str,
+        status: SessionStatus,
+        final_summary: str,
+        *,
+        current_round: int | None = None,
+    ) -> None:
         session_path = self._session_dir(session_id) / "session.json"
         if not session_path.exists():
             raise FileNotFoundError(f"session not found: {session_id}")
 
         session = self._read_json(session_path)
         ended_at = utc_now()
-        session.update(
-            {
-                "status": status.value,
-                "final_summary": final_summary,
-                "updated_at": ended_at,
-                "ended_at": ended_at,
-            }
-        )
+        updates = {
+            "status": status.value,
+            "final_summary": final_summary,
+            "updated_at": ended_at,
+            "ended_at": ended_at,
+        }
+        if current_round is not None:
+            updates["current_round"] = current_round
+        session.update(updates)
         self._write_json(session_path, session)
         self._write_json(
             self._session_dir(session_id) / "final_report.json",
