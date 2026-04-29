@@ -24,9 +24,55 @@ V2 is the next capability layer on top of V1:
 - demand-side verification and challenge generation
 - final hard verification
 - Hermes-inspired skill evolution
+- unified Claude Code / Codex worker output observability
 - future visual process UI
 
 V2 should reuse V1's dispatch, adapter, workspace, policy, and run recorder paths instead of replacing them.
+
+## 0.1 Requirement Lineage
+
+This spec must preserve three requirement layers that emerged in sequence.
+
+### Original Requirement: Codex Supervises Claude Code
+
+The original goal was a Codex-first local orchestrator where Codex can assign work to Claude Code, keep Claude in a controlled workspace, record structured results, and decide whether to accept, retry, reroute, or ask the human.
+
+V1 implements the foundation for this:
+
+- `dispatch`
+- Claude Code CLI adapter
+- agent registry
+- workspace modes
+- policy gate
+- run recorder
+- deterministic result evaluator
+- `runs list/show`
+
+V2 must not replace this. It should treat each worker invocation as a V1 run and compose those runs into higher-level sessions.
+
+### Midpoint Requirement: Visualize Claude Code and Codex Output
+
+After V1 was usable from the Codex App, the next problem was observability: terminal JSON and raw stdout are not enough to understand what Claude Code or a future Codex worker did.
+
+This remains a real requirement. V2 should preserve raw output visibility while moving beyond raw output:
+
+- show prompt, command, stdout, stderr, structured output, changed files, artifacts, and policy decisions for each run
+- show both Claude Code output and future Codex worker output through the same `Agent`/`RunRecord` shape
+- make output inspectable in a run view and also embedded in the session timeline
+- distinguish raw worker text from demand-side Codex verification, challenge, and decision text
+
+The visual target is therefore not a generic stdout viewer. It is a process viewer that includes raw outputs as evidence.
+
+### Current Requirement: Adversarial Sessions and Evolving Skills
+
+The current goal is a demand-service loop:
+
+- demand-side Codex specifies and challenges the requirement
+- worker-side Agent executes, explains, repairs, and defends
+- the system verifies evidence every round and performs final hard verification at the end
+- session outcomes generate governed, Hermes-inspired skill candidates
+
+This is the defining V2 capability. The UI and records should make the adversarial process visible, and skill evolution should turn repeated session lessons into reusable procedure only after validation.
 
 ## 1. Problem Statement
 
@@ -39,7 +85,7 @@ The current orchestrator can dispatch a single task from Codex to a worker agent
 5. The loop repeats until the requirement is accepted, blocked, or escalated.
 6. The system learns reusable procedural knowledge from the session without blindly changing its long-term behavior.
 
-The goal is not only to visualize Claude output. The goal is to make the interaction process observable, replayable, and improvable.
+Visualizing Claude Code and future Codex worker output remains necessary, but it is not sufficient by itself. The larger goal is to make the interaction process observable, replayable, and improvable: raw worker output becomes evidence inside a requirement-level adversarial session.
 
 ## 2. Chosen Direction
 
@@ -77,6 +123,7 @@ Skill learning follows a Hermes-inspired model: sessions can generate skill cand
 - Support fully automatic multi-round execution with explicit maximum rounds and stop conditions.
 - Combine existing project verification commands with Codex-generated adversarial checks.
 - Persist learning artifacts as candidate skills that can later become active procedural memory.
+- Preserve the midpoint observability requirement by making Claude Code and future Codex worker outputs easy to inspect inside run and session views.
 - Keep the current local-first design: subprocess adapters, local `.orchestrator/` state, deterministic policy gates, and inspectable artifacts.
 - Keep the architecture ready for a future Codex worker adapter and richer UI.
 
@@ -207,6 +254,27 @@ Fields:
 - `decision`
 - `created_at`
 
+### 7.2.1 OutputTrace
+
+Fields:
+
+- `trace_id`
+- `session_id`
+- `turn_id`
+- `run_id`
+- `agent`
+- `adapter`
+- `prompt_artifact`
+- `command`
+- `stdout_artifact`
+- `stderr_artifact`
+- `structured_output_artifact`
+- `changed_files`
+- `policy_summary`
+- `display_summary`
+
+`OutputTrace` is the bridge between the midpoint visualization requirement and the V2 session model. It lets the UI show raw Claude Code or future Codex worker output without mixing it up with demand-side Codex challenge text.
+
 ### 7.3 ChallengeRecord
 
 Fields:
@@ -280,6 +348,7 @@ Keep state local under `.orchestrator/`:
     <session_id>/
       session.json
       turns.jsonl
+      output_traces.jsonl
       challenges.jsonl
       verifications.jsonl
       learning.json
@@ -300,7 +369,7 @@ Keep state local under `.orchestrator/`:
     index.json
 ```
 
-Runs remain the low-level execution records. Sessions compose runs into a requirement-level story.
+Runs remain the low-level execution records. Output traces index the parts of each run that should be visible to humans. Sessions compose runs and output traces into a requirement-level story.
 
 ## 9. Session Flow
 
@@ -445,17 +514,25 @@ orchestrator skills reject --repo /path/to/repo --skill-id <id> --reason "too br
 
 The V2 initial implementation can output JSON only. A local UI can be built on the same records later.
 
-## 11. UI Direction
+## 11. UI and Observability Direction
 
-The UI should show process, not just stdout:
+The UI should show process, not just stdout, while still preserving raw output inspection as a first-class capability:
 
 - Session list with status, round count, final decision, and assigned agent.
 - Two-column turn view: demand-side challenge on the left, worker response on the right.
 - Evidence panel for tests, command output, changed files, and policy decisions.
+- Per-run output panel for prompt, command, stdout, stderr, structured output, artifacts, and changed files.
+- Agent filter so Claude Code and future Codex worker outputs can be inspected through the same view.
 - Skill evolution panel showing learning notes and pending skills.
 - Control panel for accepting, retrying, approving skills, or marking human review.
 
 The V2 initial implementation does not need the UI. The recorded session format should make the UI straightforward.
+
+For implementation planning, treat visual output in three layers:
+
+1. V1 run inspection: JSON output through `runs list/show`.
+2. V2 session inspection: JSON output through `sessions list/show`, including `OutputTrace`.
+3. Future browser UI: render runs, output traces, turns, challenges, verifications, and pending skills as one process view.
 
 ## 12. Policy and Safety
 
@@ -513,6 +590,7 @@ Add models, recorder, and JSON inspection commands:
 
 - `session start` can initially run a single execute/final-verify cycle.
 - `sessions list/show` reads persisted records.
+- `OutputTrace` links each session turn back to the underlying Claude Code or future Codex worker output.
 
 ### Phase 2: Multi-Round Engine
 
@@ -540,6 +618,7 @@ Build a local browser UI on top of session records:
 
 - session list
 - turn timeline
+- raw Claude Code / Codex worker output panel
 - evidence panel
 - skill evolution panel
 
@@ -558,6 +637,7 @@ The implementation is successful when:
 - A user can start an adversarial session from the CLI.
 - The session runs at least one worker execution through the existing adapter path.
 - The session records turns, verification evidence, and final decision.
+- The session records output traces that expose the worker prompt, command, stdout, stderr, structured output, artifacts, and changed files.
 - The loop can perform multiple rounds when the first attempt fails or is challenged.
 - The final decision distinguishes accepted, failed, blocked, and needs-human outcomes.
 - The system can generate a pending skill from session learning evidence.
