@@ -28,6 +28,7 @@ orchestrator claude bridge supervise \
 ```
 
 `supervise` 接管已存在的 supervised bridge。
+`--verification-command` 是必填项；自动 loop 不允许无验证地 accept Claude 输出。
 
 ```bash
 orchestrator claude bridge run \
@@ -40,6 +41,7 @@ orchestrator claude bridge run \
 ```
 
 `run` 先创建 supervised bridge，然后自动进入 `supervise`。
+`--verification-command` 是必填项，可以重复传入多条命令。
 
 ## 循环语义
 
@@ -48,7 +50,7 @@ orchestrator claude bridge run \
 1. 读取 bridge status。
 2. 如果没有 `latest_turn` 且 bridge/session 还在运行，sleep 后继续轮询。
 3. 如果 bridge/session 已终结，返回最终状态。
-4. 对新的 Claude turn 运行所有 verification commands。
+4. 对新的 Claude turn 运行所有 verification commands；没有 verification command 时直接报错，不启动自动验收。
 5. 全部验证通过后执行 `accept`。
 6. 任一验证失败或 blocked 时执行 `challenge --send`，让 Claude 修复。
 7. 达到 `max_rounds` 后执行 `needs-human`，保留最后的失败验证和 challenge 证据。

@@ -26,6 +26,7 @@ class BridgeSupervisorLoop:
         poll_interval_seconds: float = 5.0,
         max_wait_cycles: int | None = None,
     ) -> dict[str, Any]:
+        self._require_verification_commands(verification_commands)
         start_result = self._bridge.start(
             repo_root=repo_root,
             goal=goal,
@@ -57,6 +58,7 @@ class BridgeSupervisorLoop:
     ) -> dict[str, Any]:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
+        self._require_verification_commands(verification_commands)
 
         events: list[dict[str, Any]] = []
         processed_turn_ids: set[str] = set()
@@ -67,6 +69,7 @@ class BridgeSupervisorLoop:
             snapshot = self._bridge.status(repo_root=repo_root, bridge_id=bridge_id)
             bridge = snapshot["bridge"]
             resolved_bridge_id = str(bridge["bridge_id"])
+            self._require_supervised_snapshot(snapshot)
             terminal = self._terminal_result(snapshot, rounds_used, events)
             if terminal:
                 return terminal
@@ -158,9 +161,6 @@ class BridgeSupervisorLoop:
         verification_commands: list[str],
         events: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        if not verification_commands:
-            events.append({"action": "verify", "bridge_id": bridge_id, "turn_id": turn_id, "status": "skipped"})
-            return None
         for command in verification_commands:
             verification_result = self._bridge.verify(
                 repo_root=repo_root,
@@ -199,6 +199,15 @@ class BridgeSupervisorLoop:
             rounds_used=rounds_used,
             events=events,
         )
+
+    def _require_verification_commands(self, verification_commands: list[str]) -> None:
+        if not any(command.strip() for command in verification_commands):
+            raise ValueError("at least one verification command is required for bridge auto-supervision")
+
+    def _require_supervised_snapshot(self, snapshot: dict[str, Any]) -> None:
+        bridge = snapshot["bridge"]
+        if not bridge.get("supervised") or not bridge.get("session_id"):
+            raise ValueError(f"bridge {bridge['bridge_id']} is not supervised")
 
     def _terminal_result(
         self,

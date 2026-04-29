@@ -190,7 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     claude_bridge_supervise.add_argument("--repo", required=True)
     claude_bridge_supervise.add_argument("--bridge-id", required=False)
-    claude_bridge_supervise.add_argument("--verification-command", action="append", default=[])
+    claude_bridge_supervise.add_argument("--verification-command", action="append", required=True)
     claude_bridge_supervise.add_argument("--max-rounds", type=int, default=3)
     claude_bridge_supervise.add_argument("--poll-interval", type=float, default=5.0)
     claude_bridge_run = claude_bridge_subparsers.add_parser(
@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("none", "log", "terminal"),
         default="none",
     )
-    claude_bridge_run.add_argument("--verification-command", action="append", default=[])
+    claude_bridge_run.add_argument("--verification-command", action="append", required=True)
     claude_bridge_run.add_argument("--max-rounds", type=int, default=3)
     claude_bridge_run.add_argument("--poll-interval", type=float, default=5.0)
 

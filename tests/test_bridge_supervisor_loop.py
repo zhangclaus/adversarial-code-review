@@ -72,6 +72,73 @@ def test_supervisor_accepts_after_verification_passes(tmp_path: Path):
     assert recorder.read_session("session-auto-accept")["session"]["status"] == "accepted"
 
 
+def test_supervisor_rejects_missing_verification_commands(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=lambda command, **kwargs: CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"完成。"}',
+            stderr="",
+        ),
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-missing-verification",
+        turn_id_factory=lambda: "turn-start",
+        session_id_factory=lambda: "session-missing-verification",
+        task_id_factory=lambda: "task-missing-verification",
+        trace_id_factory=lambda: "trace-missing-verification",
+    )
+    bridge.start(repo_root=repo_root, goal="实现功能", workspace_mode="shared", supervised=True)
+
+    try:
+        BridgeSupervisorLoop(bridge).supervise(
+            repo_root=repo_root,
+            bridge_id=None,
+            verification_commands=[],
+            max_rounds=2,
+            poll_interval_seconds=0,
+        )
+    except ValueError as exc:
+        assert "verification command" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+    assert recorder.read_session("session-missing-verification")["session"]["status"] == "running"
+
+
+def test_supervisor_rejects_unsupervised_bridge(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=lambda command, **kwargs: CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"完成。"}',
+            stderr="",
+        ),
+        bridge_id_factory=lambda: "bridge-unsupervised",
+        turn_id_factory=lambda: "turn-start",
+    )
+    bridge.start(repo_root=repo_root, goal="普通 bridge", workspace_mode="readonly", supervised=False)
+
+    try:
+        BridgeSupervisorLoop(bridge).supervise(
+            repo_root=repo_root,
+            bridge_id=None,
+            verification_commands=["pytest -q"],
+            max_rounds=2,
+            poll_interval_seconds=0,
+        )
+    except ValueError as exc:
+        assert "not supervised" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
 def test_supervisor_challenges_failed_verification_until_acceptance(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
