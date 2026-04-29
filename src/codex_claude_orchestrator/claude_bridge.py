@@ -13,6 +13,7 @@ from codex_claude_orchestrator.models import (
     ChallengeRecord,
     ChallengeType,
     EvaluationOutcome,
+    NextAction,
     OutputTrace,
     SessionRecord,
     SessionStatus,
@@ -542,11 +543,11 @@ class ClaudeBridge:
         parse_error = turn.get("parse_error")
         structured_output = None
         if turn["returncode"] == 0 and not parse_error and result_text.strip():
-            structured_output = {
-                "summary": result_text,
-                "status": "completed",
-                "completed": True,
-            }
+            return EvaluationOutcome(
+                accepted=False,
+                next_action=NextAction.NEEDS_CODEX_REVIEW,
+                summary=result_text,
+            )
         return self._result_evaluator.evaluate(
             WorkerResult(
                 raw_output=str(turn.get("stdout") or ""),

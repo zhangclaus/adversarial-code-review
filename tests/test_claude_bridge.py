@@ -347,12 +347,14 @@ def test_bridge_start_supervised_creates_session_and_mirrors_initial_turn(tmp_pa
     assert details["turns"][0]["phase"] == "execute"
     assert details["turns"][0]["from_agent"] == "claude"
     assert details["turns"][0]["to_agent"] == "codex"
+    assert details["turns"][0]["decision"] == "needs_codex_review"
     assert details["output_traces"][0]["trace_id"] == "trace-start"
     assert details["output_traces"][0]["run_id"] == "turn-start"
     assert details["output_traces"][0]["command"][0:2] == ["claude", "--print"]
     assert details["output_traces"][0]["stdout_artifact"].endswith("bridge/turn-start/stdout.txt")
     assert details["output_traces"][0]["stderr_artifact"].endswith("bridge/turn-start/stderr.txt")
-    assert details["output_traces"][0]["evaluation"]["accepted"] is True
+    assert details["output_traces"][0]["evaluation"]["accepted"] is False
+    assert details["output_traces"][0]["evaluation"]["next_action"] == "needs_codex_review"
 
 
 def test_bridge_start_supervised_failure_finalizes_linked_session_needs_human(tmp_path: Path):

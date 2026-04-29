@@ -136,6 +136,26 @@ def test_guard_command_blocks_env_option_wrapped_commands(command):
 @pytest.mark.parametrize(
     "command",
     [
+        ["/usr/bin/git", "reset", "--hard"],
+        ["/bin/rm", "-rf", "x"],
+        ["env", "FOO=bar", "/usr/bin/git", "reset", "--hard"],
+        ["env", "FOO=bar", "/bin/rm", "-rf", "x"],
+        ["git", "-C", ".", "reset", "--hard"],
+        ["rm", "-fr", "x"],
+        ["rm", "-r", "-f", "x"],
+        ["git", "clean", "-df"],
+    ],
+)
+def test_guard_command_blocks_destructive_path_and_option_variants(command):
+    decision = PolicyGate().guard_command(command)
+
+    assert decision.allowed is False
+    assert "blocked command prefix" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         ["env", "FOO=bar", "python3", "-m", "pytest", "-q"],
         [".venv/bin/python", "-m", "pytest", "-q"],
         ["python3", "-m", "pytest", "-q"],

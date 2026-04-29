@@ -49,6 +49,7 @@ class FailureClass(StrEnum):
 
 class NextAction(StrEnum):
     ACCEPT = "accept"
+    NEEDS_CODEX_REVIEW = "needs_codex_review"
     RETRY_SAME_AGENT = "retry_same_agent"
     RETRY_WITH_TIGHTER_PROMPT = "retry_with_tighter_prompt"
     REROUTE_OTHER_AGENT = "reroute_other_agent"

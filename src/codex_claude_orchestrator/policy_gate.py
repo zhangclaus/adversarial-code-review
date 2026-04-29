@@ -58,8 +58,15 @@ class PolicyGate:
             return PolicyDecision(allowed=False, reason=f"blocked command wrapper: {env_wrapper}")
 
         effective_command = self._effective_command(command)
+        blocked_destructive_command = self._blocked_destructive_command(effective_command)
+        if blocked_destructive_command:
+            return PolicyDecision(
+                allowed=False,
+                reason=f"blocked command prefix: {blocked_destructive_command}",
+            )
+        normalized_command = self._normalize_executable(effective_command)
         for blocked_prefix in self._blocked_command_prefixes:
-            if tuple(effective_command[: len(blocked_prefix)]) == blocked_prefix:
+            if tuple(normalized_command[: len(blocked_prefix)]) == blocked_prefix:
                 return PolicyDecision(
                     allowed=False,
                     reason=f"blocked command prefix: {' '.join(blocked_prefix)}",
@@ -94,6 +101,68 @@ class PolicyGate:
                 break
             index += 1
         return command[index:]
+
+    def _normalize_executable(self, command: list[str]) -> list[str]:
+        if not command:
+            return command
+        return [Path(command[0]).name, *command[1:]]
+
+    def _blocked_destructive_command(self, command: list[str]) -> str | None:
+        if not command:
+            return None
+
+        executable = Path(command[0]).name
+        args = command[1:]
+        if executable == "rm" and self._has_force_and_recursive(args):
+            return "rm -rf"
+        if executable == "git":
+            return self._blocked_git_destructive_command(args)
+        return None
+
+    def _blocked_git_destructive_command(self, args: list[str]) -> str | None:
+        for index, arg in enumerate(args):
+            remaining_args = args[index + 1 :]
+            if arg == "reset" and "--hard" in remaining_args:
+                return "git reset --hard"
+            if arg == "clean" and self._git_clean_removes_directories(remaining_args):
+                return "git clean -fd"
+        return None
+
+    def _git_clean_removes_directories(self, args: list[str]) -> bool:
+        force = False
+        directories = False
+        for arg in args:
+            if arg == "--":
+                break
+            if arg == "--force":
+                force = True
+                continue
+            if not arg.startswith("-") or arg == "-":
+                continue
+            if arg.startswith("--"):
+                continue
+            flags = arg[1:]
+            force = force or "f" in flags
+            directories = directories or "d" in flags
+        return force and directories
+
+    def _has_force_and_recursive(self, args: list[str]) -> bool:
+        force = False
+        recursive = False
+        for arg in args:
+            if arg == "--":
+                break
+            if arg.startswith("--"):
+                option = arg.split("=", 1)[0]
+                force = force or option == "--force"
+                recursive = recursive or option == "--recursive"
+                continue
+            if not arg.startswith("-") or arg == "-":
+                continue
+            flags = arg[1:]
+            force = force or "f" in flags
+            recursive = recursive or "r" in flags or "R" in flags
+        return force and recursive
 
     def _blocked_wrapper(self, command: list[str]) -> str | None:
         if len(command) < 2:
