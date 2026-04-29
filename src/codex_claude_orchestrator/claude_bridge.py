@@ -566,9 +566,17 @@ class ClaudeBridge:
             raise ValueError(f"bridge {record['bridge_id']} is not supervised")
 
     def _require_not_finalized(self, record: dict[str, Any]) -> None:
+        terminal_statuses = {"accepted", "needs_human"}
         status = str(record.get("status") or "")
-        if status in {"accepted", "needs_human"}:
+        if status in terminal_statuses:
             raise ValueError(f"bridge {record['bridge_id']} is already finalized as {status}")
+        if record.get("supervised") and record.get("session_id"):
+            session = self._session_recorder.read_session(str(record["session_id"]))["session"]
+            session_status = str(session.get("status") or "")
+            if session_status in terminal_statuses:
+                raise ValueError(
+                    f"session {record['session_id']} is already finalized as {session_status}"
+                )
 
     def _require_bridge_turn(self, bridge_id: str, turn_id: str) -> None:
         if not any(turn.get("turn_id") == turn_id for turn in self._read_turns(bridge_id)):
@@ -627,6 +635,17 @@ class ClaudeBridge:
         if current_status in terminal_statuses:
             if current_status == bridge_status and current_session_status == status.value:
                 return {"bridge": record, "session": session}
+            if current_status == bridge_status and current_session_status not in terminal_statuses:
+                self._session_recorder.finalize_session(
+                    str(record["session_id"]),
+                    status,
+                    summary,
+                    current_round=1,
+                )
+                return {
+                    "bridge": record,
+                    "session": self._session_recorder.read_session(str(record["session_id"]))["session"],
+                }
             raise ValueError(
                 f"bridge {resolved_bridge_id} is already finalized as {current_status}; "
                 f"cannot finalize as {bridge_status}"
