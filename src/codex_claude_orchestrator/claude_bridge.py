@@ -10,9 +10,12 @@ from typing import Any
 from uuid import uuid4
 
 from codex_claude_orchestrator.models import (
+    ChallengeRecord,
+    ChallengeType,
     EvaluationOutcome,
     OutputTrace,
     SessionRecord,
+    SessionStatus,
     TurnPhase,
     TurnRecord,
     VerificationRecord,
@@ -215,6 +218,71 @@ class ClaudeBridge:
         self._write_record(resolved_bridge_id, updated)
         self._append_log_verification(resolved_bridge_id, verification)
         return {"bridge": updated, "verification": verification.to_dict()}
+
+    def challenge(
+        self,
+        *,
+        repo_root: Path,
+        bridge_id: str | None,
+        summary: str,
+        repair_goal: str,
+        send: bool = False,
+    ) -> dict[str, Any]:
+        repo = self._resolve_repo(repo_root)
+        resolved_bridge_id = self._resolve_bridge_id(bridge_id)
+        record = self._read_record(resolved_bridge_id)
+        self._require_supervised(record)
+        latest_turn_id = str(record.get("latest_turn_id") or "")
+        if not latest_turn_id:
+            raise ValueError(f"bridge {resolved_bridge_id} has no turn to challenge")
+        self._require_bridge_turn(resolved_bridge_id, latest_turn_id)
+
+        challenge = ChallengeRecord(
+            challenge_id=self._challenge_id_factory(),
+            session_id=str(record["session_id"]),
+            turn_id=latest_turn_id,
+            round_index=1,
+            challenge_type=ChallengeType.QUALITY_RISK,
+            summary=summary,
+            question="What repair is needed for Codex to accept this bridge turn?",
+            expected_evidence="Claude should provide repaired work and verification evidence.",
+            severity=2,
+            evidence={"bridge_id": resolved_bridge_id, "turn_id": latest_turn_id},
+            repair_goal=repair_goal,
+        )
+        self._session_recorder.append_challenge(str(record["session_id"]), challenge)
+        self._append_challenge_turn(record, challenge)
+        updated = dict(record)
+        updated["latest_challenge_id"] = challenge.challenge_id
+        updated["updated_at"] = challenge.created_at
+        self._write_record(resolved_bridge_id, updated)
+        self._append_log_challenge(resolved_bridge_id, challenge)
+
+        sent_turn = None
+        if send:
+            send_result = self.send(repo_root=repo, bridge_id=resolved_bridge_id, message=repair_goal)
+            updated = send_result["bridge"]
+            sent_turn = send_result["latest_turn"]
+
+        return {"bridge": updated, "challenge": challenge.to_dict(), "latest_turn": sent_turn}
+
+    def accept(self, *, repo_root: Path, bridge_id: str | None, summary: str) -> dict[str, Any]:
+        return self._finalize_supervised_bridge(
+            repo_root=repo_root,
+            bridge_id=bridge_id,
+            status=SessionStatus.ACCEPTED,
+            bridge_status="accepted",
+            summary=summary,
+        )
+
+    def needs_human(self, *, repo_root: Path, bridge_id: str | None, summary: str) -> dict[str, Any]:
+        return self._finalize_supervised_bridge(
+            repo_root=repo_root,
+            bridge_id=bridge_id,
+            status=SessionStatus.NEEDS_HUMAN,
+            bridge_status="needs_human",
+            summary=summary,
+        )
 
     def list(self, *, repo_root: Path) -> list[dict[str, Any]]:
         self._resolve_repo(repo_root)
@@ -500,6 +568,51 @@ class ClaudeBridge:
         )
         self._session_recorder.append_turn(str(record["session_id"]), turn)
 
+    def _append_challenge_turn(self, record: dict[str, Any], challenge: ChallengeRecord) -> None:
+        turn = TurnRecord(
+            turn_id=f"turn-{challenge.challenge_id}",
+            session_id=str(record["session_id"]),
+            round_index=1,
+            phase=TurnPhase.CHALLENGE,
+            task_id=str(record["root_task_id"]),
+            from_agent="codex",
+            to_agent="claude",
+            message=challenge.repair_goal,
+            decision="challenge",
+            summary=challenge.summary,
+            payload={"challenge": challenge.to_dict()},
+        )
+        self._session_recorder.append_turn(str(record["session_id"]), turn)
+
+    def _finalize_supervised_bridge(
+        self,
+        *,
+        repo_root: Path,
+        bridge_id: str | None,
+        status: SessionStatus,
+        bridge_status: str,
+        summary: str,
+    ) -> dict[str, Any]:
+        self._resolve_repo(repo_root)
+        resolved_bridge_id = self._resolve_bridge_id(bridge_id)
+        record = self._read_record(resolved_bridge_id)
+        self._require_supervised(record)
+        self._session_recorder.finalize_session(
+            str(record["session_id"]),
+            status,
+            summary,
+            current_round=1,
+        )
+        updated = dict(record)
+        updated["status"] = bridge_status
+        updated["updated_at"] = utc_now()
+        self._write_record(resolved_bridge_id, updated)
+        self._append_log_status(resolved_bridge_id, f"{bridge_status}: {summary}")
+        return {
+            "bridge": updated,
+            "session": self._session_recorder.read_session(str(record["session_id"]))["session"],
+        }
+
     def _mark_record_running(self, record: dict[str, Any]) -> dict[str, Any]:
         updated = dict(record)
         updated["status"] = "running"
@@ -621,6 +734,22 @@ class ClaudeBridge:
                     f"[{verification.created_at}] [VERIFY] {status}",
                     verification.command or "",
                     verification.summary,
+                    "",
+                ]
+            ),
+        )
+
+    def _append_log_challenge(self, bridge_id: str, challenge: ChallengeRecord) -> None:
+        self._append_log_text(
+            bridge_id,
+            "\n".join(
+                [
+                    "",
+                    f"[{challenge.created_at}] [CHALLENGE]",
+                    challenge.summary,
+                    "",
+                    "[REPAIR_GOAL]",
+                    challenge.repair_goal,
                     "",
                 ]
             ),

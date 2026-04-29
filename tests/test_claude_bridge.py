@@ -428,6 +428,133 @@ def test_bridge_status_returns_supervision_snapshot(tmp_path: Path):
     assert snapshot["suggested_next"]["challenge_pending"] is False
 
 
+def test_bridge_challenge_send_records_challenge_and_sends_repair_goal(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+    responses = [
+        CompletedProcess(
+            ["claude"],
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"第一轮。"}',
+            stderr="",
+        ),
+        CompletedProcess(
+            ["claude"],
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"修复完成。"}',
+            stderr="",
+        ),
+    ]
+    commands = []
+
+    def fake_runner(command, **kwargs):
+        commands.append(list(command))
+        return responses.pop(0)
+
+    turn_ids = iter(["turn-start", "turn-repair"])
+    trace_ids = iter(["trace-start", "trace-repair"])
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=fake_runner,
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-challenge",
+        turn_id_factory=lambda: next(turn_ids),
+        session_id_factory=lambda: "session-challenge",
+        task_id_factory=lambda: "task-challenge",
+        trace_id_factory=lambda: next(trace_ids),
+        challenge_id_factory=lambda: "challenge-bridge",
+    )
+
+    bridge.start(repo_root=repo_root, goal="实现功能", workspace_mode="shared", supervised=True)
+    result = bridge.challenge(
+        repo_root=repo_root,
+        bridge_id=None,
+        summary="缺少验证证据",
+        repair_goal="补充测试并汇报验证结果",
+        send=True,
+    )
+
+    assert result["challenge"]["challenge_id"] == "challenge-bridge"
+    assert result["bridge"]["latest_challenge_id"] == "challenge-bridge"
+    assert result["latest_turn"]["turn_id"] == "turn-repair"
+    assert "补充测试并汇报验证结果" in commands[1]
+    details = recorder.read_session("session-challenge")
+    assert details["challenges"][0]["summary"] == "缺少验证证据"
+    assert details["turns"][1]["phase"] == "challenge"
+    assert details["turns"][1]["round_index"] == 1
+    assert details["turns"][2]["phase"] == "execute"
+    assert details["turns"][2]["round_index"] == 1
+    snapshot = bridge.status(repo_root=repo_root, bridge_id=None)
+    assert snapshot["latest_challenge"]["challenge_id"] == "challenge-bridge"
+    assert snapshot["suggested_next"]["challenge_pending"] is True
+
+
+def test_bridge_accept_and_needs_human_finalize_supervised_session(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=lambda command, **kwargs: CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"完成。"}',
+            stderr="",
+        ),
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-final",
+        turn_id_factory=lambda: "turn-start",
+        session_id_factory=lambda: "session-final",
+        task_id_factory=lambda: "task-final",
+        trace_id_factory=lambda: "trace-final",
+    )
+
+    bridge.start(repo_root=repo_root, goal="最终确认", workspace_mode="readonly", supervised=True)
+    accepted = bridge.accept(repo_root=repo_root, bridge_id=None, summary="Codex reviewed and accepted")
+
+    assert accepted["bridge"]["status"] == "accepted"
+    assert recorder.read_session("session-final")["session"]["status"] == "accepted"
+
+    blocked = bridge.needs_human(repo_root=repo_root, bridge_id=None, summary="Need user decision")
+
+    assert blocked["bridge"]["status"] == "needs_human"
+    details = recorder.read_session("session-final")
+    assert details["session"]["status"] == "needs_human"
+    assert details["final_report"]["final_summary"] == "Need user decision"
+
+
+def test_bridge_challenge_requires_supervised_bridge(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=lambda command, **kwargs: CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"完成。"}',
+            stderr="",
+        ),
+        bridge_id_factory=lambda: "bridge-unsupervised",
+        turn_id_factory=lambda: "turn-start",
+    )
+
+    bridge.start(repo_root=repo_root, goal="普通 bridge", workspace_mode="readonly")
+
+    try:
+        bridge.challenge(
+            repo_root=repo_root,
+            bridge_id=None,
+            summary="should fail",
+            repair_goal="nope",
+        )
+    except ValueError as exc:
+        assert "not supervised" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
 def test_bridge_verify_records_verification_for_latest_turn(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
