@@ -338,7 +338,7 @@ class ClaudeBridge:
             "-e",
             "activate",
             "-e",
-            f"do script {json.dumps(shell_command)}",
+            f"do script {json.dumps(shell_command, ensure_ascii=False)}",
             "-e",
             "end tell",
         ]

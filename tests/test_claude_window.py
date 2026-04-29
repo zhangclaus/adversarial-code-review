@@ -7,8 +7,8 @@ from codex_claude_orchestrator.claude_window import ClaudeWindowLauncher
 
 
 def test_claude_window_launcher_creates_prompt_script_and_launches_terminal(tmp_path: Path):
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
+    repo_root = tmp_path / "研究生" / "论文" / "repo"
+    repo_root.mkdir(parents=True)
     calls: list[list[str]] = []
 
     def fake_runner(command, **kwargs):
@@ -43,6 +43,9 @@ def test_claude_window_launcher_creates_prompt_script_and_launches_terminal(tmp_
     assert "tell application \"Terminal\"" in calls[0][2]
     assert "activate" in calls[0]
     assert any(part.startswith("do script") for part in calls[0])
+    do_script = next(part for part in calls[0] if part.startswith("do script"))
+    assert "研究生" in do_script
+    assert "\\u" not in do_script
 
 
 def test_claude_window_launcher_dry_run_does_not_launch_terminal(tmp_path: Path):

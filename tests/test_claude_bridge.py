@@ -47,8 +47,8 @@ def test_bridge_start_runs_claude_and_records_latest_session(tmp_path: Path):
 
 
 def test_bridge_start_with_log_visual_opens_append_only_window(tmp_path: Path):
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
+    repo_root = tmp_path / "研究生" / "论文" / "repo"
+    repo_root.mkdir(parents=True)
     visual_calls = []
     call_order = []
 
@@ -93,6 +93,9 @@ def test_bridge_start_with_log_visual_opens_append_only_window(tmp_path: Path):
     assert visual_calls[0][:2] == ["osascript", "-e"]
     assert "activate" in visual_calls[0]
     assert any(part.startswith("do script") for part in visual_calls[0])
+    do_script = next(part for part in visual_calls[0] if part.startswith("do script"))
+    assert "研究生" in do_script
+    assert "\\u" not in do_script
     script = watch_script.read_text(encoding="utf-8")
     log_text = log_path.read_text(encoding="utf-8")
     assert "tail -n +1 -f" in script
