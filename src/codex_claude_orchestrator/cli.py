@@ -141,9 +141,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     claude_bridge_start.add_argument(
         "--visual",
-        choices=("none", "terminal"),
+        choices=("none", "log", "terminal"),
         default="none",
-        help="Open a live watcher for bridge output",
+        help="Open an append-only bridge log watcher",
     )
     claude_bridge_start.add_argument("--dry-run", action="store_true")
     claude_bridge_send = claude_bridge_subparsers.add_parser("send", help="Send a follow-up to a Claude bridge")

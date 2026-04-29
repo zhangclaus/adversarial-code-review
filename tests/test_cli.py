@@ -424,7 +424,7 @@ def test_claude_bridge_commands_route_to_bridge(tmp_path: Path, monkeypatch):
                 "--workspace-mode",
                 "readonly",
                 "--visual",
-                "terminal",
+                "log",
             ]
         )
     start_payload = json.loads(stdout.getvalue())
@@ -468,7 +468,7 @@ def test_claude_bridge_commands_route_to_bridge(tmp_path: Path, monkeypatch):
             "repo_root": repo_root.resolve(),
             "goal": "Inspect repo",
             "workspace_mode": "readonly",
-            "visual": "terminal",
+            "visual": "log",
             "dry_run": False,
         },
         {

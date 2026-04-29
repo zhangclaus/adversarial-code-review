@@ -59,11 +59,13 @@ class ClaudeBridge:
         bridge_dir = self._bridge_dir(bridge_id)
         bridge_dir.mkdir(parents=True, exist_ok=False)
         self._write_record(bridge_id, record)
+        self._initialize_log(bridge_id, record)
         self._write_latest(bridge_id)
         visual_result = self._start_visual(bridge_id=bridge_id, mode=visual, dry_run=dry_run)
         if not dry_run:
             record = self._mark_record_running(record)
             self._write_record(bridge_id, record)
+            self._append_log_status(bridge_id, "Claude start turn running")
 
         turn = self._run_turn(
             repo=repo,
@@ -152,6 +154,7 @@ class ClaudeBridge:
             workspace_mode=workspace_mode,
             resume_session_id=resume_session_id,
         )
+        self._append_log_user_message(bridge_id, turn_kind, message)
         if dry_run:
             completed = CompletedProcess(command, 0, stdout="", stderr="")
         else:
@@ -178,6 +181,7 @@ class ClaudeBridge:
             "created_at": utc_now(),
         }
         self._append_turn(bridge_id, turn)
+        self._append_log_turn_result(bridge_id, turn)
         return turn
 
     def _build_command(
@@ -281,10 +285,11 @@ class ClaudeBridge:
     def _start_visual(self, *, bridge_id: str, mode: str, dry_run: bool) -> dict[str, Any]:
         if mode == "none":
             return {"mode": "none", "launched": False}
-        if mode != "terminal":
+        if mode not in ("log", "terminal"):
             raise ValueError(f"unsupported visual mode: {mode}")
 
         watch_script_path = self._write_watch_script(bridge_id)
+        log_path = self._log_path(bridge_id)
         open_command = self._terminal_open_command(watch_script_path)
         if not dry_run:
             result = self._visual_runner(open_command, text=True, capture_output=True, check=False)
@@ -296,64 +301,27 @@ class ClaudeBridge:
                     stderr=result.stderr,
                 )
         return {
-            "mode": "terminal",
+            "mode": mode,
             "launched": not dry_run,
             "watch_script_path": str(watch_script_path),
+            "log_path": str(log_path),
             "open_command": open_command,
         }
 
     def _write_watch_script(self, bridge_id: str) -> Path:
         bridge_dir = self._bridge_dir(bridge_id)
         watch_script_path = bridge_dir / "watch.zsh"
-        record_path = bridge_dir / "record.json"
-        turns_path = bridge_dir / "turns.jsonl"
+        log_path = self._log_path(bridge_id)
         script = "\n".join(
             [
                 "#!/bin/zsh",
                 "set -e",
                 f"BRIDGE_ID={shlex.quote(bridge_id)}",
-                f"RECORD_PATH={shlex.quote(str(record_path))}",
-                f"TURNS_PATH={shlex.quote(str(turns_path))}",
-                "while true; do",
-                "  clear",
-                "  printf '[orchestrator] Claude bridge watcher: %s\\n' \"$BRIDGE_ID\"",
-                "  printf '[orchestrator] Send follow-ups from Codex with: orchestrator claude bridge send --repo <repo> --message ...\\n\\n'",
-                "  /usr/bin/python3 - \"$RECORD_PATH\" \"$TURNS_PATH\" <<'PY'",
-                "import json",
-                "import sys",
-                "from pathlib import Path",
-                "",
-                "record_path = Path(sys.argv[1])",
-                "turns_path = Path(sys.argv[2])",
-                "if record_path.exists():",
-                "    record = json.loads(record_path.read_text(encoding='utf-8'))",
-                "    print(f\"repo: {record.get('repo')}\")",
-                "    print(f\"status: {record.get('status')}  turns: {record.get('turn_count')}  claude_session: {record.get('claude_session_id') or '-'}\")",
-                "    print(f\"goal: {record.get('goal')}\")",
-                "else:",
-                "    print('record: pending')",
-                "print()",
-                "if not turns_path.exists():",
-                "    print('No turns yet.')",
-                "    raise SystemExit",
-                "turns = [json.loads(line) for line in turns_path.read_text(encoding='utf-8').splitlines() if line.strip()]",
-                "for turn in turns[-5:]:",
-                "    print('=' * 72)",
-                "    print(f\"{turn.get('kind')}  {turn.get('created_at')}  rc={turn.get('returncode')}\")",
-                "    message = (turn.get('message') or '').strip()",
-                "    result = (turn.get('result_text') or '').strip()",
-                "    if message:",
-                "        print('\\n[message]')",
-                "        print(message)",
-                "    print('\\n[claude]')",
-                "    print(result or '(no Claude output yet)')",
-                "    if turn.get('parse_error'):",
-                "        print(f\"\\n[parse_error] {turn.get('parse_error')}\")",
-                "    if turn.get('stderr'):",
-                "        print(f\"\\n[stderr]\\n{turn.get('stderr')}\")",
-                "PY",
-                "  sleep 2",
-                "done",
+                f"LOG_PATH={shlex.quote(str(log_path))}",
+                "touch \"$LOG_PATH\"",
+                "printf '[orchestrator] Claude bridge log: %s\\n' \"$BRIDGE_ID\"",
+                "printf '[orchestrator] Codex owns the conversation. Close this watcher with Ctrl-C.\\n\\n'",
+                "tail -n +1 -f \"$LOG_PATH\"",
                 "",
             ]
         )
@@ -374,6 +342,56 @@ class ClaudeBridge:
             "-e",
             "end tell",
         ]
+
+    def _log_path(self, bridge_id: str) -> Path:
+        return self._bridge_dir(bridge_id) / "bridge.log"
+
+    def _initialize_log(self, bridge_id: str, record: dict[str, Any]) -> None:
+        header = "\n".join(
+            [
+                f"# Claude bridge log: {bridge_id}",
+                f"repo: {record['repo']}",
+                f"goal: {record['goal']}",
+                f"workspace_mode: {record['workspace_mode']}",
+                f"created_at: {record['created_at']}",
+                "",
+            ]
+        )
+        self._write_text(self._log_path(bridge_id), header)
+
+    def _append_log_status(self, bridge_id: str, status: str) -> None:
+        self._append_log_text(bridge_id, f"\n[{utc_now()}] [STATUS]\n{status}\n")
+
+    def _append_log_user_message(self, bridge_id: str, turn_kind: str, message: str) -> None:
+        self._append_log_text(
+            bridge_id,
+            "\n".join(
+                [
+                    "",
+                    "=" * 72,
+                    f"[{utc_now()}] [USER] {turn_kind}",
+                    message.rstrip(),
+                    "",
+                ]
+            ),
+        )
+
+    def _append_log_turn_result(self, bridge_id: str, turn: dict[str, Any]) -> None:
+        parts = [
+            f"[{turn['created_at']}] [CLAUDE] rc={turn['returncode']}",
+            (turn.get("result_text") or "").rstrip() or "(no Claude output)",
+        ]
+        if turn.get("parse_error"):
+            parts.extend(["", f"[PARSE_ERROR] {turn['parse_error']}"])
+        if turn.get("stderr"):
+            parts.extend(["", "[STDERR]", str(turn["stderr"]).rstrip()])
+        self._append_log_text(bridge_id, "\n".join(parts) + "\n")
+
+    def _append_log_text(self, bridge_id: str, content: str) -> None:
+        log_path = self._log_path(bridge_id)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(content)
 
     def _resolve_repo(self, repo_root: Path) -> Path:
         repo = repo_root.resolve()

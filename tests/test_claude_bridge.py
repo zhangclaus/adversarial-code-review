@@ -46,7 +46,7 @@ def test_bridge_start_runs_claude_and_records_latest_session(tmp_path: Path):
     assert (repo_root / ".orchestrator" / "claude-bridge" / "latest").read_text(encoding="utf-8") == "bridge-fixed"
 
 
-def test_bridge_start_with_terminal_visual_opens_watch_window(tmp_path: Path):
+def test_bridge_start_with_log_visual_opens_append_only_window(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     visual_calls = []
@@ -78,23 +78,70 @@ def test_bridge_start_with_terminal_visual_opens_watch_window(tmp_path: Path):
         repo_root=repo_root,
         goal="检查项目结构",
         workspace_mode="readonly",
-        visual="terminal",
+        visual="log",
     )
 
     visual = result["visual"]
     watch_script = Path(visual["watch_script_path"])
+    log_path = Path(visual["log_path"])
 
-    assert visual["mode"] == "terminal"
+    assert visual["mode"] == "log"
     assert visual["launched"] is True
     assert call_order == ["visual", "claude"]
     assert watch_script.is_file()
+    assert log_path.is_file()
     assert visual_calls[0][:2] == ["osascript", "-e"]
     assert "activate" in visual_calls[0]
     assert any(part.startswith("do script") for part in visual_calls[0])
     script = watch_script.read_text(encoding="utf-8")
-    assert "turns.jsonl" in script
-    assert "while true" in script
-    assert "result_text" in script
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "tail -n +1 -f" in script
+    assert "while true" not in script
+    assert "clear" not in script
+    assert "Claude bridge log" in log_text
+    assert "第一轮完成。" in log_text
+
+
+def test_bridge_send_appends_human_readable_log(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    responses = [
+        CompletedProcess(
+            ["claude"],
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"开始。"}',
+            stderr="",
+        ),
+        CompletedProcess(
+            ["claude"],
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"继续完成。"}',
+            stderr="",
+        ),
+    ]
+
+    def fake_runner(command, **kwargs):
+        return responses.pop(0)
+
+    turn_ids = iter(["turn-start", "turn-send"])
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=fake_runner,
+        visual_runner=lambda command, **kwargs: CompletedProcess(command, 0, stdout="", stderr=""),
+        bridge_id_factory=lambda: "bridge-log",
+        turn_id_factory=lambda: next(turn_ids),
+    )
+
+    bridge.start(repo_root=repo_root, goal="检查项目结构", workspace_mode="readonly", visual="log")
+    bridge.send(repo_root=repo_root, bridge_id=None, message="继续检查")
+
+    log_path = repo_root / ".orchestrator" / "claude-bridge" / "bridge-log" / "bridge.log"
+    log_text = log_path.read_text(encoding="utf-8")
+
+    assert "[USER]" in log_text
+    assert "[CLAUDE]" in log_text
+    assert "继续检查" in log_text
+    assert "继续完成。" in log_text
 
 
 def test_bridge_start_with_visual_failure_does_not_start_claude(tmp_path: Path):
@@ -122,7 +169,7 @@ def test_bridge_start_with_visual_failure_does_not_start_claude(tmp_path: Path):
             repo_root=repo_root,
             goal="检查项目结构",
             workspace_mode="readonly",
-            visual="terminal",
+            visual="log",
         )
     except CalledProcessError as exc:
         assert "operation not permitted" in str(exc.stderr)

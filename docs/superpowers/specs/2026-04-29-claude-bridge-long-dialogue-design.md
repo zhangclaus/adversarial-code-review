@@ -8,18 +8,18 @@ Let Codex keep directing the same Claude Code conversation from inside the Codex
 
 Add `orchestrator claude bridge`, a command-oriented bridge that stores local bridge state under `.orchestrator/claude-bridge/`. It does not run a daemon. Each Codex instruction invokes one CLI command, and the bridge resumes the stored Claude Code session with `claude --print ... --resume <session_id>`.
 
-The human-facing path is a visible bridge, not a raw Claude terminal. `start --visual terminal` opens a Terminal watcher that refreshes bridge records and turn output, while Codex keeps control of all `send` calls.
+The human-facing path is a visible bridge, not a raw Claude terminal. `start --visual log` opens a Terminal watcher that tails an append-only `bridge.log`, while Codex keeps control of all `send` calls. `--visual terminal` remains accepted as a compatibility alias for the same append-only log behavior.
 
 ## Commands
 
 ```bash
-orchestrator claude bridge start --repo /path/to/repo --goal "..." --visual terminal
+orchestrator claude bridge start --repo /path/to/repo --goal "..." --visual log
 orchestrator claude bridge send --repo /path/to/repo --message "继续检查"
 orchestrator claude bridge tail --repo /path/to/repo --limit 5
 orchestrator claude bridge list --repo /path/to/repo
 ```
 
-`start` creates a bridge id and marks it as the latest bridge for the repo. With `--visual terminal`, it writes `watch.zsh` and opens Terminal before the initial Claude turn starts, so the user can see a watcher immediately while Claude is still running. The initial Claude result stores Claude's `session_id`. `send` defaults to that latest bridge, resumes the Claude session, and records the turn. `tail` and `list` are read-only inspection commands.
+`start` creates a bridge id and marks it as the latest bridge for the repo. With `--visual log`, it writes `watch.zsh` and opens Terminal before the initial Claude turn starts, so the user can see the log immediately while Claude is still running. The initial Claude result stores Claude's `session_id`. `send` defaults to that latest bridge, resumes the Claude session, and records the turn. `tail` and `list` are read-only inspection commands.
 
 ## Data Model
 
@@ -27,14 +27,15 @@ Each bridge gets:
 
 - `record.json`: bridge id, repo, goal, workspace mode, status, Claude session id, timestamps, and turn count.
 - `turns.jsonl`: every user message, command, return code, stdout/stderr, parsed result text, and Claude session id.
-- `watch.zsh`: optional Terminal watcher script for `--visual terminal`.
+- `bridge.log`: append-only human-readable transcript with `[USER]`, `[CLAUDE]`, status, stderr, and parse errors.
+- `watch.zsh`: optional Terminal watcher script for `--visual log`; it tails `bridge.log` without clearing the screen.
 - `latest`: a repo-local pointer to the default bridge.
 
 ## Safety
 
 `readonly` mode passes `--allowedTools Read,Glob,Grep,LS` and prompts Claude not to modify files. `shared` mode keeps Claude's normal permissions and asks it to preserve unrelated user work. The bridge never bypasses Claude permissions.
 
-If a requested Terminal watcher cannot be opened, `start --visual terminal` fails before launching Claude. This avoids the misleading state where Claude is running but no visual window exists.
+If a requested Terminal watcher cannot be opened, `start --visual log` fails before launching Claude. This avoids the misleading state where Claude is running but no visual window exists.
 
 ## Non-Goals
 
