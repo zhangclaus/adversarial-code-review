@@ -15,6 +15,7 @@ from codex_claude_orchestrator.models import (
     SessionRecord,
     TurnPhase,
     TurnRecord,
+    VerificationRecord,
     WorkerResult,
     WorkspaceMode,
     utc_now,
@@ -160,6 +161,59 @@ class ClaudeBridge:
         if limit >= 0:
             turns = turns[-limit:] if limit else []
         return {"bridge": record, "turns": turns}
+
+    def status(self, *, repo_root: Path, bridge_id: str | None) -> dict[str, Any]:
+        self._resolve_repo(repo_root)
+        resolved_bridge_id = self._resolve_bridge_id(bridge_id)
+        record = self._read_record(resolved_bridge_id)
+        turns = self._read_turns(resolved_bridge_id)
+        session_payload = None
+        latest_verification = None
+        latest_challenge = None
+
+        if record.get("session_id"):
+            session_payload = self._session_recorder.read_session(str(record["session_id"]))
+            verifications = session_payload["verifications"]
+            challenges = session_payload["challenges"]
+            latest_verification = verifications[-1] if verifications else None
+            latest_challenge = challenges[-1] if challenges else None
+
+        return {
+            "bridge": record,
+            "session": session_payload["session"] if session_payload else None,
+            "latest_turn": turns[-1] if turns else None,
+            "latest_verification": latest_verification,
+            "latest_challenge": latest_challenge,
+            "suggested_next": self._suggest_next(record, latest_verification, latest_challenge),
+        }
+
+    def verify(
+        self,
+        *,
+        repo_root: Path,
+        bridge_id: str | None,
+        command: str,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._resolve_repo(repo_root)
+        resolved_bridge_id = self._resolve_bridge_id(bridge_id)
+        record = self._read_record(resolved_bridge_id)
+        self._require_supervised(record)
+        if self._verification_runner is None:
+            raise ValueError("supervised bridge verification runner is not configured")
+
+        resolved_turn_id = turn_id or str(record.get("latest_turn_id") or "")
+        if not resolved_turn_id:
+            raise ValueError(f"bridge {resolved_bridge_id} has no turn to verify")
+
+        verification = self._verification_runner.run(str(record["session_id"]), resolved_turn_id, command)
+        self._append_verification_turn(record, verification)
+        updated = dict(record)
+        updated["latest_verification_status"] = "passed" if verification.passed else "failed"
+        updated["updated_at"] = verification.created_at
+        self._write_record(resolved_bridge_id, updated)
+        self._append_log_verification(resolved_bridge_id, verification)
+        return {"bridge": updated, "verification": verification.to_dict()}
 
     def list(self, *, repo_root: Path) -> list[dict[str, Any]]:
         self._resolve_repo(repo_root)
@@ -405,6 +459,42 @@ class ClaudeBridge:
             )
         )
 
+    def _suggest_next(
+        self,
+        record: dict[str, Any],
+        latest_verification: dict[str, Any] | None,
+        latest_challenge: dict[str, Any] | None,
+    ) -> dict[str, bool]:
+        verification_failed = bool(latest_verification and not latest_verification.get("passed"))
+        challenge_pending = bool(
+            latest_challenge and record.get("latest_challenge_id") == latest_challenge.get("challenge_id")
+        )
+        return {
+            "needs_codex_review": record.get("status") in ("active", "failed", "needs_human"),
+            "verification_failed": verification_failed,
+            "challenge_pending": challenge_pending,
+        }
+
+    def _require_supervised(self, record: dict[str, Any]) -> None:
+        if not record.get("supervised") or not record.get("session_id"):
+            raise ValueError(f"bridge {record['bridge_id']} is not supervised")
+
+    def _append_verification_turn(self, record: dict[str, Any], verification: VerificationRecord) -> None:
+        turn = TurnRecord(
+            turn_id=f"turn-{verification.verification_id}",
+            session_id=str(record["session_id"]),
+            round_index=1,
+            phase=TurnPhase.FINAL_VERIFY,
+            task_id=str(record["root_task_id"]),
+            from_agent="codex",
+            to_agent="codex",
+            message=verification.command or "",
+            decision="passed" if verification.passed else "failed",
+            summary=verification.summary,
+            payload={"verification": verification.to_dict()},
+        )
+        self._session_recorder.append_turn(str(record["session_id"]), turn)
+
     def _mark_record_running(self, record: dict[str, Any]) -> dict[str, Any]:
         updated = dict(record)
         updated["status"] = "running"
@@ -515,6 +605,21 @@ class ClaudeBridge:
         if turn.get("stderr"):
             parts.extend(["", "[STDERR]", str(turn["stderr"]).rstrip()])
         self._append_log_text(bridge_id, "\n".join(parts) + "\n")
+
+    def _append_log_verification(self, bridge_id: str, verification: VerificationRecord) -> None:
+        status = "PASS" if verification.passed else "FAIL"
+        self._append_log_text(
+            bridge_id,
+            "\n".join(
+                [
+                    "",
+                    f"[{verification.created_at}] [VERIFY] {status}",
+                    verification.command or "",
+                    verification.summary,
+                    "",
+                ]
+            ),
+        )
 
     def _append_log_text(self, bridge_id: str, content: str) -> None:
         log_path = self._log_path(bridge_id)

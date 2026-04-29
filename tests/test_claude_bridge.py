@@ -4,7 +4,31 @@ from pathlib import Path
 from subprocess import CalledProcessError, CompletedProcess
 
 from codex_claude_orchestrator.claude_bridge import ClaudeBridge
+from codex_claude_orchestrator.models import VerificationKind, VerificationRecord
 from codex_claude_orchestrator.session_recorder import SessionRecorder
+
+
+class FakeBridgeVerificationRunner:
+    def __init__(self, recorder: SessionRecorder, results: list[bool]):
+        self._recorder = recorder
+        self._results = list(results)
+        self.commands: list[str] = []
+
+    def run(self, session_id: str, turn_id: str, command: str) -> VerificationRecord:
+        self.commands.append(command)
+        passed = self._results.pop(0)
+        record = VerificationRecord(
+            verification_id=f"verification-{len(self.commands)}",
+            session_id=session_id,
+            turn_id=turn_id,
+            kind=VerificationKind.COMMAND,
+            passed=passed,
+            command=command,
+            exit_code=0 if passed else 1,
+            summary=f"verification {'passed' if passed else 'failed'}",
+        )
+        self._recorder.append_verification(session_id, record)
+        return record
 
 
 def test_bridge_start_runs_claude_and_records_latest_session(tmp_path: Path):
@@ -367,3 +391,75 @@ def test_bridge_send_supervised_mirrors_follow_up_turn_in_session_round_one(tmp_
     assert details["output_traces"][1]["trace_id"] == "trace-send"
     assert details["output_traces"][1]["stdout_artifact"].endswith("bridge/turn-send/stdout.txt")
     assert details["output_traces"][1]["stderr_artifact"].endswith("bridge/turn-send/stderr.txt")
+
+
+def test_bridge_status_returns_supervision_snapshot(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=lambda command, **kwargs: CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"完成。"}',
+            stderr="",
+        ),
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-status",
+        turn_id_factory=lambda: "turn-start",
+        session_id_factory=lambda: "session-status",
+        task_id_factory=lambda: "task-status",
+        trace_id_factory=lambda: "trace-status",
+    )
+
+    bridge.start(repo_root=repo_root, goal="检查状态", workspace_mode="readonly", supervised=True)
+    snapshot = bridge.status(repo_root=repo_root, bridge_id=None)
+
+    assert snapshot["bridge"]["bridge_id"] == "bridge-status"
+    assert snapshot["bridge"]["session_id"] == "session-status"
+    assert snapshot["latest_turn"]["turn_id"] == "turn-start"
+    assert snapshot["session"]["session_id"] == "session-status"
+    assert snapshot["latest_verification"] is None
+    assert snapshot["latest_challenge"] is None
+    assert snapshot["suggested_next"]["needs_codex_review"] is True
+    assert snapshot["suggested_next"]["verification_failed"] is False
+    assert snapshot["suggested_next"]["challenge_pending"] is False
+
+
+def test_bridge_verify_records_verification_for_latest_turn(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+    verification_runner = FakeBridgeVerificationRunner(recorder, [False])
+
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=lambda command, **kwargs: CompletedProcess(
+            command,
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"完成。"}',
+            stderr="",
+        ),
+        session_recorder=recorder,
+        verification_runner=verification_runner,
+        bridge_id_factory=lambda: "bridge-verify",
+        turn_id_factory=lambda: "turn-start",
+        session_id_factory=lambda: "session-verify",
+        task_id_factory=lambda: "task-verify",
+        trace_id_factory=lambda: "trace-verify",
+    )
+
+    bridge.start(repo_root=repo_root, goal="运行验证", workspace_mode="readonly", supervised=True)
+    result = bridge.verify(repo_root=repo_root, bridge_id=None, command="pytest -q")
+
+    assert result["verification"]["passed"] is False
+    assert result["verification"]["turn_id"] == "turn-start"
+    assert result["bridge"]["latest_verification_status"] == "failed"
+    assert verification_runner.commands == ["pytest -q"]
+
+    details = recorder.read_session("session-verify")
+    assert details["verifications"][0]["command"] == "pytest -q"
+    assert details["turns"][-1]["phase"] == "final_verify"
+    assert details["turns"][-1]["round_index"] == 1
