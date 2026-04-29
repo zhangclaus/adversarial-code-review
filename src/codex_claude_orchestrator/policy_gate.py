@@ -113,7 +113,7 @@ class PolicyGate:
     def _blocked_git_destructive_command(self, args: list[str]) -> str | None:
         for index, arg in enumerate(args):
             remaining_args = args[index + 1 :]
-            if arg == "reset" and "--hard" in remaining_args:
+            if arg == "reset" and any(self._is_git_hard_option(option) for option in remaining_args):
                 return "git reset --hard"
             if arg == "clean" and self._git_clean_removes_directories(remaining_args):
                 return "git clean -fd"
@@ -125,7 +125,7 @@ class PolicyGate:
         for arg in args:
             if arg == "--":
                 break
-            if arg == "--force":
+            if self._is_git_force_option(arg):
                 force = True
                 continue
             if not arg.startswith("-") or arg == "-":
@@ -136,6 +136,14 @@ class PolicyGate:
             force = force or "f" in flags
             directories = directories or "d" in flags
         return force and directories
+
+    def _is_git_hard_option(self, arg: str) -> bool:
+        option = arg.split("=", 1)[0]
+        return len(option) >= len("--har") and "--hard".startswith(option)
+
+    def _is_git_force_option(self, arg: str) -> bool:
+        option = arg.split("=", 1)[0]
+        return len(option) >= len("--for") and "--force".startswith(option)
 
     def _has_force_and_recursive(self, args: list[str]) -> bool:
         force = False

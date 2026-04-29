@@ -171,6 +171,26 @@ def test_guard_command_blocks_nested_env_destructive_commands(command):
 @pytest.mark.parametrize(
     "command",
     [
+        ["git", "reset", "--har"],
+        ["git", "-C", ".", "reset", "--har"],
+        ["env", "FOO=bar", "git", "reset", "--har"],
+        ["env", "FOO=bar", "/usr/bin/env", "BAR=baz", "git", "reset", "--har"],
+        ["git", "clean", "-d", "--for"],
+        ["git", "clean", "-d", "--forc"],
+        ["git", "clean", "--for", "-d"],
+        ["env", "FOO=bar", "git", "clean", "-d", "--for"],
+    ],
+)
+def test_guard_command_blocks_git_abbreviated_destructive_options(command):
+    decision = PolicyGate().guard_command(command)
+
+    assert decision.allowed is False
+    assert "blocked command prefix" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         ["env", "FOO=bar", "python3", "-m", "pytest", "-q"],
         ["env", "FOO=bar", "/usr/bin/env", "BAR=baz", "python3", "-m", "pytest", "-q"],
         [".venv/bin/python", "-m", "pytest", "-q"],
