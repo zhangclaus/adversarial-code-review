@@ -994,6 +994,10 @@ def test_bridge_rejects_mutations_after_supervised_follow_up_failure(tmp_path: P
     failed = bridge.send(repo_root=repo_root, bridge_id=None, message="继续")
 
     assert failed["bridge"]["status"] == "failed"
+    details = recorder.read_session("session-follow-up-failed")
+    assert details["session"]["status"] == "needs_human"
+    assert details["final_report"]["status"] == "needs_human"
+    assert "Claude send turn failed" in details["final_report"]["final_summary"]
 
     try:
         bridge.send(repo_root=repo_root, bridge_id=None, message="不应继续")
