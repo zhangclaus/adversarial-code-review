@@ -59,6 +59,11 @@ class ClaudeBridge:
         bridge_dir = self._bridge_dir(bridge_id)
         bridge_dir.mkdir(parents=True, exist_ok=False)
         self._write_record(bridge_id, record)
+        self._write_latest(bridge_id)
+        visual_result = self._start_visual(bridge_id=bridge_id, mode=visual, dry_run=dry_run)
+        if not dry_run:
+            record = self._mark_record_running(record)
+            self._write_record(bridge_id, record)
 
         turn = self._run_turn(
             repo=repo,
@@ -71,8 +76,6 @@ class ClaudeBridge:
         )
         record = self._advance_record(record, turn, dry_run=dry_run)
         self._write_record(bridge_id, record)
-        self._write_latest(bridge_id)
-        visual_result = self._start_visual(bridge_id=bridge_id, mode=visual, dry_run=dry_run)
         return {"bridge": record, "latest_turn": turn, "visual": visual_result}
 
     def send(
@@ -267,6 +270,12 @@ class ClaudeBridge:
             updated["status"] = "active" if turn["returncode"] == 0 else "failed"
         updated["turn_count"] = int(updated["turn_count"]) + 1
         updated["updated_at"] = turn["created_at"]
+        return updated
+
+    def _mark_record_running(self, record: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(record)
+        updated["status"] = "running"
+        updated["updated_at"] = utc_now()
         return updated
 
     def _start_visual(self, *, bridge_id: str, mode: str, dry_run: bool) -> dict[str, Any]:

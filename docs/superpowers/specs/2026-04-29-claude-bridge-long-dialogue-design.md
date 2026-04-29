@@ -19,7 +19,7 @@ orchestrator claude bridge tail --repo /path/to/repo --limit 5
 orchestrator claude bridge list --repo /path/to/repo
 ```
 
-`start` creates a bridge id, sends the initial goal to Claude, stores Claude's `session_id`, and marks it as the latest bridge for the repo. With `--visual terminal`, it also writes `watch.zsh` and opens Terminal to show the latest bridge output. `send` defaults to that latest bridge, resumes the Claude session, and records the turn. `tail` and `list` are read-only inspection commands.
+`start` creates a bridge id and marks it as the latest bridge for the repo. With `--visual terminal`, it writes `watch.zsh` and opens Terminal before the initial Claude turn starts, so the user can see a watcher immediately while Claude is still running. The initial Claude result stores Claude's `session_id`. `send` defaults to that latest bridge, resumes the Claude session, and records the turn. `tail` and `list` are read-only inspection commands.
 
 ## Data Model
 

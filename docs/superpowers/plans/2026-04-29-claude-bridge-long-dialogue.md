@@ -17,6 +17,7 @@
 - [x] Implement `ClaudeBridge` storage, parsing, and command execution.
 - [x] Wire bridge commands into `cli.py`.
 - [x] Add `bridge start --visual terminal` watcher window support.
+- [x] Launch the visual watcher before the first Claude turn blocks.
 - [x] Run targeted tests.
 - [x] Run the full pytest suite.
 - [x] Commit docs, implementation, and tests.

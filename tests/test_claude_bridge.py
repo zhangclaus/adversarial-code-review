@@ -50,8 +50,10 @@ def test_bridge_start_with_terminal_visual_opens_watch_window(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     visual_calls = []
+    call_order = []
 
     def fake_runner(command, **kwargs):
+        call_order.append("claude")
         return CompletedProcess(
             command,
             0,
@@ -60,6 +62,7 @@ def test_bridge_start_with_terminal_visual_opens_watch_window(tmp_path: Path):
         )
 
     def fake_visual_runner(command, **kwargs):
+        call_order.append("visual")
         visual_calls.append(list(command))
         return CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -83,6 +86,7 @@ def test_bridge_start_with_terminal_visual_opens_watch_window(tmp_path: Path):
 
     assert visual["mode"] == "terminal"
     assert visual["launched"] is True
+    assert call_order == ["visual", "claude"]
     assert watch_script.is_file()
     assert visual_calls[0][:2] == ["osascript", "-e"]
     assert "activate" in visual_calls[0]
