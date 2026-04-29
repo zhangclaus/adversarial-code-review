@@ -71,7 +71,6 @@ class ClaudeBridge:
         repo = self._resolve_repo(repo_root)
         bridge_id = self._bridge_id_factory()
         created_at = utc_now()
-        supervised_session = self._create_supervised_session(repo, goal, workspace_mode) if supervised else None
         record = {
             "bridge_id": bridge_id,
             "repo": str(repo),
@@ -83,7 +82,14 @@ class ClaudeBridge:
             "created_at": created_at,
             "updated_at": created_at,
         }
-        if supervised_session:
+        bridge_dir = self._bridge_dir(bridge_id)
+        bridge_dir.mkdir(parents=True, exist_ok=False)
+        self._write_record(bridge_id, record)
+        self._initialize_log(bridge_id, record)
+        self._write_latest(bridge_id)
+        visual_result = self._start_visual(bridge_id=bridge_id, mode=visual, dry_run=dry_run)
+        if supervised:
+            supervised_session = self._create_supervised_session(repo, goal, workspace_mode)
             record.update(
                 {
                     "supervised": True,
@@ -94,12 +100,7 @@ class ClaudeBridge:
                     "latest_challenge_id": None,
                 }
             )
-        bridge_dir = self._bridge_dir(bridge_id)
-        bridge_dir.mkdir(parents=True, exist_ok=False)
-        self._write_record(bridge_id, record)
-        self._initialize_log(bridge_id, record)
-        self._write_latest(bridge_id)
-        visual_result = self._start_visual(bridge_id=bridge_id, mode=visual, dry_run=dry_run)
+            self._write_record(bridge_id, record)
         if not dry_run:
             record = self._mark_record_running(record)
             self._write_record(bridge_id, record)
@@ -351,7 +352,7 @@ class ClaudeBridge:
         bridge_turn = TurnRecord(
             turn_id=turn_id,
             session_id=session_id,
-            round_index=int(record["turn_count"]),
+            round_index=1,
             phase=TurnPhase.EXECUTE,
             task_id=task_id,
             run_id=turn_id,

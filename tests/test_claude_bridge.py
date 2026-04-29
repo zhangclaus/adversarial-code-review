@@ -152,6 +152,7 @@ def test_bridge_start_with_visual_failure_does_not_start_claude(tmp_path: Path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     claude_calls = []
+    recorder = SessionRecorder(repo_root / ".orchestrator")
 
     def fake_runner(command, **kwargs):
         claude_calls.append(list(command))
@@ -164,8 +165,10 @@ def test_bridge_start_with_visual_failure_does_not_start_claude(tmp_path: Path):
         state_root=repo_root / ".orchestrator",
         runner=fake_runner,
         visual_runner=fake_visual_runner,
+        session_recorder=recorder,
         bridge_id_factory=lambda: "bridge-visual-fail",
         turn_id_factory=lambda: "turn-never",
+        session_id_factory=lambda: "session-visual-fail",
     )
 
     try:
@@ -174,6 +177,7 @@ def test_bridge_start_with_visual_failure_does_not_start_claude(tmp_path: Path):
             goal="检查项目结构",
             workspace_mode="readonly",
             visual="log",
+            supervised=True,
         )
     except CalledProcessError as exc:
         assert "operation not permitted" in str(exc.stderr)
@@ -181,6 +185,7 @@ def test_bridge_start_with_visual_failure_does_not_start_claude(tmp_path: Path):
         raise AssertionError("expected CalledProcessError")
 
     assert claude_calls == []
+    assert recorder.list_sessions() == []
 
 
 def test_bridge_send_resumes_existing_claude_session(tmp_path: Path):
@@ -302,3 +307,63 @@ def test_bridge_start_supervised_creates_session_and_mirrors_initial_turn(tmp_pa
     assert details["output_traces"][0]["stdout_artifact"].endswith("bridge/turn-start/stdout.txt")
     assert details["output_traces"][0]["stderr_artifact"].endswith("bridge/turn-start/stderr.txt")
     assert details["output_traces"][0]["evaluation"]["accepted"] is True
+
+
+def test_bridge_send_supervised_mirrors_follow_up_turn_in_session_round_one(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = SessionRecorder(repo_root / ".orchestrator")
+    responses = [
+        CompletedProcess(
+            ["claude"],
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"初始实现完成。"}',
+            stderr="",
+        ),
+        CompletedProcess(
+            ["claude"],
+            0,
+            stdout='{"type":"result","session_id":"claude-session-1","result":"后续实现完成。"}',
+            stderr="warning: note\n",
+        ),
+    ]
+
+    def fake_runner(command, **kwargs):
+        return responses.pop(0)
+
+    turn_ids = iter(["turn-start", "turn-send"])
+    trace_ids = iter(["trace-start", "trace-send"])
+    bridge = ClaudeBridge(
+        state_root=repo_root / ".orchestrator",
+        runner=fake_runner,
+        session_recorder=recorder,
+        bridge_id_factory=lambda: "bridge-supervised",
+        turn_id_factory=lambda: next(turn_ids),
+        session_id_factory=lambda: "session-bridge",
+        task_id_factory=lambda: "task-bridge",
+        trace_id_factory=lambda: next(trace_ids),
+    )
+
+    bridge.start(
+        repo_root=repo_root,
+        goal="实现 Codex 监督 bridge",
+        workspace_mode="shared",
+        supervised=True,
+    )
+    result = bridge.send(
+        repo_root=repo_root,
+        bridge_id=None,
+        message="继续实现",
+    )
+
+    assert result["bridge"]["latest_turn_id"] == "turn-send"
+
+    details = recorder.read_session("session-bridge")
+    execute_turns = [turn for turn in details["turns"] if turn["phase"] == "execute"]
+    assert len(execute_turns) == 2
+    assert len(details["output_traces"]) == 2
+    assert [turn["round_index"] for turn in execute_turns] == [1, 1]
+    assert details["session"]["max_rounds"] == 1
+    assert details["output_traces"][1]["trace_id"] == "trace-send"
+    assert details["output_traces"][1]["stdout_artifact"].endswith("bridge/turn-send/stdout.txt")
+    assert details["output_traces"][1]["stderr_artifact"].endswith("bridge/turn-send/stderr.txt")
