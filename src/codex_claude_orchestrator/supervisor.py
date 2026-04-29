@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from codex_claude_orchestrator.models import EventRecord, RunRecord, TaskRecord, WorkerResult
+from codex_claude_orchestrator.models import DispatchReport, EventRecord, RunRecord, TaskRecord, WorkerResult
 
 
 class Supervisor:
@@ -25,6 +25,9 @@ class Supervisor:
         self._result_evaluator = result_evaluator
 
     def dispatch(self, task: TaskRecord, source_repo: Path):
+        return self.dispatch_with_report(task, source_repo).evaluation
+
+    def dispatch_with_report(self, task: TaskRecord, source_repo: Path) -> DispatchReport:
         compiled = self._prompt_compiler.compile(task)
         allocation = self._workspace_manager.prepare(source_repo, task)
         command = self._adapter.build_command(compiled)
@@ -63,7 +66,7 @@ class Supervisor:
             )
             evaluation = self._result_evaluator.evaluate(result, workspace_decision)
             self._run_recorder.write_result(run.run_id, result, evaluation)
-            return evaluation
+            return DispatchReport(run_id=run.run_id, task_id=task.task_id, evaluation=evaluation)
 
         command_decision = self._policy_gate.guard_command(command)
         if not command_decision.allowed:
@@ -75,7 +78,7 @@ class Supervisor:
             )
             evaluation = self._result_evaluator.evaluate(result, command_decision)
             self._run_recorder.write_result(run.run_id, result, evaluation)
-            return evaluation
+            return DispatchReport(run_id=run.run_id, task_id=task.task_id, evaluation=evaluation)
 
         result = self._adapter.execute(compiled, allocation)
         result.changed_files = self._workspace_manager.detect_changes(allocation)
@@ -98,4 +101,4 @@ class Supervisor:
                 payload=evaluation.to_dict(),
             ),
         )
-        return evaluation
+        return DispatchReport(run_id=run.run_id, task_id=task.task_id, evaluation=evaluation)
