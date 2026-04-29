@@ -77,30 +77,21 @@ class PolicyGate:
         return PolicyDecision(allowed=True, reason=None)
 
     def _effective_command(self, command: list[str]) -> list[str]:
-        if not command or Path(command[0]).name != "env":
-            return command
+        effective_command = command
+        while effective_command and Path(effective_command[0]).name == "env":
+            effective_command = self._unwrap_env_command(effective_command)
+        return effective_command
 
+    def _unwrap_env_command(self, command: list[str]) -> list[str]:
         index = 1
         while index < len(command):
             arg = command[index]
             if arg == "--":
-                index += 1
-                break
-            if arg in {"-S", "--split-string"} or arg.startswith("--split-string="):
-                return ["env", "-S"]
-            if arg in {"-i", "--ignore-environment"}:
-                index += 1
-                continue
-            if arg in {"-u", "--unset"}:
-                index += 2
-                continue
-            if arg.startswith("--unset="):
-                index += 1
-                continue
+                return command[index + 1 :]
             if not self._is_env_assignment(arg):
-                break
+                return command[index:]
             index += 1
-        return command[index:]
+        return []
 
     def _normalize_executable(self, command: list[str]) -> list[str]:
         if not command:
@@ -187,17 +178,20 @@ class PolicyGate:
         return None
 
     def _blocked_env_option_wrapper(self, command: list[str]) -> str | None:
-        if not command or Path(command[0]).name != "env":
-            return None
-
-        for arg in command[1:]:
-            if arg == "--":
+        effective_command = command
+        while effective_command and Path(effective_command[0]).name == "env":
+            for index, arg in enumerate(effective_command[1:], start=1):
+                if arg == "--":
+                    effective_command = effective_command[index + 1 :]
+                    break
+                if self._is_env_assignment(arg):
+                    continue
+                if arg.startswith("-"):
+                    return f"env {arg}"
+                effective_command = effective_command[index:]
+                break
+            else:
                 return None
-            if self._is_env_assignment(arg):
-                continue
-            if arg.startswith("-"):
-                return f"env {arg}"
-            return None
         return None
 
     def _is_shell_inline_flag(self, arg: str) -> bool:

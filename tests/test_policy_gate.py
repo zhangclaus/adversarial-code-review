@@ -156,7 +156,23 @@ def test_guard_command_blocks_destructive_path_and_option_variants(command):
 @pytest.mark.parametrize(
     "command",
     [
+        ["env", "FOO=bar", "/usr/bin/env", "BAR=baz", "/usr/bin/git", "reset", "--hard"],
+        ["env", "FOO=bar", "/usr/bin/env", "BAR=baz", "/bin/rm", "-rf", "x"],
+        ["env", "FOO=bar", "/usr/bin/env", "-i", "git", "reset", "--hard"],
+        ["env", "FOO=bar", "/usr/bin/env", "--", "git", "reset", "--hard"],
+    ],
+)
+def test_guard_command_blocks_nested_env_destructive_commands(command):
+    decision = PolicyGate().guard_command(command)
+
+    assert decision.allowed is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         ["env", "FOO=bar", "python3", "-m", "pytest", "-q"],
+        ["env", "FOO=bar", "/usr/bin/env", "BAR=baz", "python3", "-m", "pytest", "-q"],
         [".venv/bin/python", "-m", "pytest", "-q"],
         ["python3", "-m", "pytest", "-q"],
     ],
