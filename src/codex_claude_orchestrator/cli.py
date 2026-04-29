@@ -17,6 +17,7 @@ from codex_claude_orchestrator.session_engine import SessionEngine
 from codex_claude_orchestrator.session_recorder import SessionRecorder
 from codex_claude_orchestrator.skill_evolution import SkillEvolution
 from codex_claude_orchestrator.supervisor import Supervisor
+from codex_claude_orchestrator.ui_server import run_ui_server
 from codex_claude_orchestrator.verification_runner import VerificationRunner
 from codex_claude_orchestrator.workspace_manager import WorkspaceManager
 
@@ -99,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
     skills_reject.add_argument("--repo", required=True)
     skills_reject.add_argument("--skill-id", required=True)
     skills_reject.add_argument("--reason", default="")
+
+    ui = subparsers.add_parser("ui", help="Start the local visual console")
+    ui.add_argument("--repo", required=True)
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--port", type=int, default=8765)
 
     subparsers.add_parser("doctor", help="Check local orchestrator prerequisites")
     return parser
@@ -230,6 +236,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         raise ValueError(f"Unsupported skills command: {args.skills_command}")
+
+    if args.command == "ui":
+        result = run_ui_server(
+            repo_root=Path(args.repo).resolve(),
+            host=args.host,
+            port=args.port,
+        )
+        if result is not None:
+            print(json.dumps(result, ensure_ascii=False))
+        return 0
 
     if args.command != "dispatch":
         raise ValueError(f"Unsupported command: {args.command}")

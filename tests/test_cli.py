@@ -36,6 +36,7 @@ def test_build_parser_exposes_v2_session_and_skill_commands():
     assert "session" in subparsers_action.choices
     assert "sessions" in subparsers_action.choices
     assert "skills" in subparsers_action.choices
+    assert "ui" in subparsers_action.choices
 
 
 class FakeSupervisor:
@@ -338,6 +339,29 @@ def test_skills_reject_command_prints_json(tmp_path: Path):
     payload = json.loads(stdout.getvalue())
     assert exit_code == 0
     assert payload["status"] == "rejected"
+
+
+def test_ui_command_starts_visual_console(tmp_path: Path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    calls = []
+
+    def fake_run_ui_server(**kwargs):
+        calls.append(kwargs)
+        return {"url": "http://127.0.0.1:9999", "repo": str(kwargs["repo_root"])}
+
+    monkeypatch.setattr("codex_claude_orchestrator.cli.run_ui_server", fake_run_ui_server)
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        exit_code = main(["ui", "--repo", str(repo_root), "--host", "127.0.0.1", "--port", "9999"])
+
+    payload = json.loads(stdout.getvalue())
+    assert exit_code == 0
+    assert payload["url"] == "http://127.0.0.1:9999"
+    assert calls[0]["repo_root"] == repo_root.resolve()
+    assert calls[0]["host"] == "127.0.0.1"
+    assert calls[0]["port"] == 9999
 
 
 class FakeWorkerResult:
