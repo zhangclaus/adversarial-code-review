@@ -181,11 +181,14 @@ def test_guard_command_blocks_nested_env_destructive_commands(command):
         ["env", "FOO=bar", "/usr/bin/env", "BAR=baz", "git", "reset", "--har"],
         ["git", "clean", "-d", "--for"],
         ["git", "clean", "-d", "--fo"],
+        ["git", "clean", "-d", "--f"],
         ["git", "clean", "-d", "--forc"],
         ["git", "clean", "--for", "-d"],
         ["git", "clean", "--fo", "-d"],
+        ["git", "clean", "--f", "-d"],
         ["env", "FOO=bar", "git", "clean", "-d", "--for"],
         ["env", "FOO=bar", "/usr/bin/git", "clean", "-d", "--fo"],
+        ["env", "FOO=bar", "/usr/bin/git", "clean", "-d", "--f"],
     ],
 )
 def test_guard_command_blocks_git_abbreviated_destructive_options(command):

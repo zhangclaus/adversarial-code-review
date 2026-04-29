@@ -165,7 +165,7 @@ class PolicyGate:
 
     def _is_git_force_option(self, arg: str) -> bool:
         option = arg.split("=", 1)[0]
-        return len(option) >= len("--fo") and "--force".startswith(option)
+        return len(option) >= len("--f") and "--force".startswith(option)
 
     def _has_force_and_recursive(self, args: list[str]) -> bool:
         force = False
