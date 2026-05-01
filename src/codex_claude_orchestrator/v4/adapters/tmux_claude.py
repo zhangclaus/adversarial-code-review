@@ -11,6 +11,10 @@ from codex_claude_orchestrator.v4.runtime import (
 )
 
 
+def _non_empty_str(value) -> str:
+    return value if isinstance(value, str) and value else ""
+
+
 class ClaudeCodeTmuxAdapter:
     def __init__(self, *, native_session):
         self._native_session = native_session
@@ -35,10 +39,18 @@ class ClaudeCodeTmuxAdapter:
             message=turn.message,
             turn_marker=turn.expected_marker,
         )
+        marker = _non_empty_str(result.get("marker")) or turn.expected_marker
+        reason = _non_empty_str(result.get("reason"))
+        if result.get("delivered") is False or result.get("ok") is False:
+            return DeliveryResult(
+                delivered=False,
+                marker=marker,
+                reason=reason,
+            )
         return DeliveryResult(
             delivered=True,
-            marker=result.get("marker", turn.expected_marker),
-            reason="sent to tmux pane",
+            marker=marker,
+            reason=reason or "sent to tmux pane",
         )
 
     def watch_turn(self, turn: TurnEnvelope):
@@ -49,12 +61,9 @@ class ClaudeCodeTmuxAdapter:
             lines=200,
             turn_marker=turn.expected_marker,
         )
-        text = observation.get("snapshot", "")
-        artifact_refs = (
-            [observation.get("transcript_artifact", "")]
-            if observation.get("transcript_artifact")
-            else []
-        )
+        text = _non_empty_str(observation.get("snapshot"))
+        transcript_artifact = _non_empty_str(observation.get("transcript_artifact"))
+        artifact_refs = [transcript_artifact] if transcript_artifact else []
         if text:
             yield RuntimeEvent(
                 type="output.chunk",
@@ -63,13 +72,14 @@ class ClaudeCodeTmuxAdapter:
                 payload={"text": text},
                 artifact_refs=artifact_refs,
             )
-        if observation.get("marker_seen", False):
+        if observation.get("marker_seen") is True:
+            marker = _non_empty_str(observation.get("marker")) or turn.expected_marker
             yield RuntimeEvent(
                 type="marker.detected",
                 turn_id=turn.turn_id,
                 worker_id=turn.worker_id,
                 payload={
-                    "marker": observation.get("marker", turn.expected_marker),
+                    "marker": marker,
                     "source": "tmux",
                 },
                 artifact_refs=artifact_refs,
