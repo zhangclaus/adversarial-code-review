@@ -74,6 +74,25 @@ Findings:
     assert verdict.findings == ["Verification failure is swallowed."]
 
 
+def test_review_verdict_parser_does_not_fallback_when_structured_block_is_invalid():
+    text = """Reviewer output
+<<<CODEX_REVIEW
+summary: This structured block forgot the verdict.
+findings:
+- It should be authoritative despite being invalid.
+>>>
+Verdict: BLOCK
+Summary: Plain text outside the block should not be used.
+Findings:
+- This fallback finding should be ignored.
+"""
+
+    verdict = ReviewVerdictParser().parse(text)
+
+    assert verdict.status == "unknown"
+    assert verdict.summary == "review verdict was not parseable"
+
+
 def test_review_verdict_parser_returns_unknown_for_unparseable_output():
     verdict = ReviewVerdictParser().parse("Looks fine to me without a verdict line.")
 

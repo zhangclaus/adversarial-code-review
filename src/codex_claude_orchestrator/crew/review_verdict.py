@@ -58,9 +58,7 @@ class ReviewVerdictParser:
         refs = list(evidence_refs or [])
         block = self._extract_structured_block(text)
         if block is not None:
-            verdict = self._parse_verdict_text(block, evidence_refs=refs, raw_artifact=raw_artifact)
-            if verdict.status != "unknown":
-                return verdict
+            return self._parse_verdict_text(block, evidence_refs=refs, raw_artifact=raw_artifact)
 
         return self._parse_verdict_text(text, evidence_refs=refs, raw_artifact=raw_artifact)
 
