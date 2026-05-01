@@ -40,7 +40,7 @@ class VerificationAdapter:
                 summary=f"command setup failed: {error}",
                 stderr=f"command setup failed: {error}\n",
             )
-        except (FileNotFoundError, NotADirectoryError) as error:
+        except OSError as error:
             return self._failed_result(
                 verification_id=verification_id,
                 command=command,
