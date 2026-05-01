@@ -491,6 +491,51 @@ def test_supervisor_loop_dynamic_unknown_review_returns_needs_human(tmp_path: Pa
     assert any(item["artifact_name"] == "readiness/round-1.json" for item in controller.artifacts)
 
 
+def test_supervisor_loop_dynamic_requires_fresh_review_after_prior_block(tmp_path: Path):
+    controller = FakeController([{"passed": True, "summary": "command passed: exit code 0"}])
+    controller.status_payload = {"crew": {"crew_id": "crew-1", "root_goal": "Refactor public API"}, "workers": []}
+    review_snapshots = [
+        "\n".join(
+            [
+                "Auditor done",
+                "<<<CODEX_REVIEW",
+                "verdict: BLOCK",
+                "summary: Regression in public API.",
+                "findings:",
+                "- Public method now returns None.",
+                ">>>",
+            ]
+        ),
+        "Auditor responded without a structured verdict.",
+    ]
+
+    def observe_block_then_unknown(**kwargs):
+        controller.observed.append(kwargs)
+        marker = kwargs.get("turn_marker") or "<<<CODEX_TURN_DONE status=ready_for_codex>>>"
+        if kwargs["worker_id"] == "worker-patch-risk-auditor":
+            return {"snapshot": f"{review_snapshots.pop(0)}\n{marker}", "marker_seen": True}
+        return {"snapshot": f"{kwargs['worker_id']} done\n{marker}", "marker_seen": True}
+
+    controller.observe_worker = observe_block_then_unknown
+    loop = CrewSupervisorLoop(controller=controller, poll_interval_seconds=0, max_observe_attempts=1)
+
+    result = loop.run(
+        repo_root=tmp_path,
+        goal="Refactor public API",
+        verification_commands=["pytest -q"],
+        max_rounds=2,
+        spawn_policy="dynamic",
+    )
+
+    auditor_sends = [call for call in controller.sent if call["worker_id"] == "worker-patch-risk-auditor"]
+    auditor_observations = [call for call in controller.observed if call["worker_id"] == "worker-patch-risk-auditor"]
+    assert result["status"] == "needs_human"
+    assert result["reason"] == "review_verdict_unknown"
+    assert controller.verify_called == []
+    assert len(auditor_sends) == 2
+    assert len(auditor_observations) == 2
+
+
 def test_supervisor_loop_dynamic_records_known_pitfall_and_spawns_guardrail_after_three_failures(tmp_path: Path):
     controller = FakeController(
         [

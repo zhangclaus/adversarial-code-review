@@ -277,141 +277,164 @@ class CrewSupervisorLoop:
                             "reason": review_action.reason,
                         }
                     )
-                    auditor_marker = self._turn_marker(crew_id, auditor["worker_id"], "dynamic-review", round_index)
+                else:
+                    auditor = self._active_review_worker(
+                        self._controller.status(repo_root=repo_root, crew_id=crew_id)
+                    )
+                if auditor is None:
+                    review_verdict = self._review_parser.parse("")
+                    report, readiness_artifact = self._write_readiness_report(
+                        crew_id=crew_id,
+                        round_index=round_index,
+                        worker=source_worker,
+                        changes=changes,
+                        scope_result=scope_result,
+                        review_verdict=review_verdict,
+                    )
+                    return {
+                        "crew_id": crew_id,
+                        "status": "needs_human",
+                        "reason": "review_worker_unavailable",
+                        "rounds": round_index,
+                        "events": events,
+                        "readiness_artifact": readiness_artifact,
+                        "readiness_status": report.status,
+                    }
+                auditor_marker = self._turn_marker(crew_id, auditor["worker_id"], "dynamic-review", round_index)
+                self._controller.send_worker(
+                    repo_root=repo_root,
+                    crew_id=crew_id,
+                    worker_id=auditor["worker_id"],
+                    message=self._review_message(changes),
+                    turn_marker=auditor_marker,
+                )
+                events.append({"action": "send_worker", "worker_id": auditor["worker_id"], "round": round_index})
+                auditor_observation = self._wait_for_marker(
+                    repo_root,
+                    crew_id,
+                    auditor["worker_id"],
+                    interval,
+                    turn_marker=auditor_marker,
+                )
+                events.append(
+                    {
+                        "action": "observe_worker",
+                        "round": round_index,
+                        "worker_id": auditor["worker_id"],
+                        "marker_seen": auditor_observation.get("marker_seen", False),
+                    }
+                )
+                if not auditor_observation.get("marker_seen", False):
+                    return self._waiting_result(crew_id, auditor["worker_id"], events)
+                raw_artifact = auditor.get("transcript_artifact", "")
+                review_verdict = self._review_parser.parse(
+                    auditor_observation.get("snapshot", ""),
+                    evidence_refs=[raw_artifact] if raw_artifact else [],
+                    raw_artifact=raw_artifact,
+                )
+                review_artifact = self._write_json_artifact_if_supported(
+                    crew_id=crew_id,
+                    artifact_name=f"workers/{auditor['worker_id']}/review_verdict.json",
+                    payload=review_verdict.to_dict(),
+                )
+                events.append(
+                    {
+                        "action": "review_verdict_parsed",
+                        "round": round_index,
+                        "worker_id": auditor["worker_id"],
+                        "status": review_verdict.status,
+                        "artifact": review_artifact,
+                    }
+                )
+                self._record_blackboard_if_supported(
+                    crew_id=crew_id,
+                    entry_type="review",
+                    content=f"Review verdict {review_verdict.status}: {review_verdict.summary}",
+                    evidence_refs=[
+                        ref
+                        for ref in [review_artifact, *review_verdict.evidence_refs]
+                        if ref
+                    ],
+                )
+                if review_verdict.status == "unknown":
+                    report, readiness_artifact = self._write_readiness_report(
+                        crew_id=crew_id,
+                        round_index=round_index,
+                        worker=source_worker,
+                        changes=changes,
+                        scope_result=scope_result,
+                        review_verdict=review_verdict,
+                    )
+                    return {
+                        "crew_id": crew_id,
+                        "status": "needs_human",
+                        "reason": "review_verdict_unknown",
+                        "rounds": round_index,
+                        "events": events,
+                        "readiness_artifact": readiness_artifact,
+                        "readiness_status": report.status,
+                    }
+                if review_verdict.status == "block":
+                    summary = self._review_challenge_message(review_verdict)
+                    self._controller.challenge(crew_id=crew_id, summary=summary)
+                    events.append({"action": "challenge", "round": round_index, "summary": summary})
+                    continue
+                review_status = review_verdict.status
+                browser_action = policy.decide(
+                    {
+                        "crew_id": crew_id,
+                        "goal": details.get("crew", {}).get("root_goal", ""),
+                        "workers": self._controller.status(repo_root=repo_root, crew_id=crew_id).get("workers", []),
+                        "changed_files": changes.get("changed_files", []),
+                        "review_status": review_status,
+                        "browser_check_status": None,
+                        "verification_failures": verification_failures,
+                        "repo_write_scope": repo_write_scope,
+                    }
+                )
+                if browser_action.action_type is DecisionActionType.SPAWN_WORKER and browser_action.contract is not None:
+                    self._record_decision_if_supported(crew_id, browser_action.to_dict())
+                    browser_worker = self._controller.ensure_worker(
+                        repo_root=repo_root,
+                        crew_id=crew_id,
+                        contract=browser_action.contract,
+                        allow_dirty_base=False,
+                    )
+                    events.append(
+                        {
+                            "action": "spawn_worker",
+                            "worker_id": browser_worker["worker_id"],
+                            "contract_id": browser_action.contract.contract_id,
+                            "label": browser_action.contract.label,
+                            "reason": browser_action.reason,
+                        }
+                    )
+                    browser_marker = self._turn_marker(crew_id, browser_worker["worker_id"], "dynamic-browser", round_index)
                     self._controller.send_worker(
                         repo_root=repo_root,
                         crew_id=crew_id,
-                        worker_id=auditor["worker_id"],
-                        message=self._review_message(changes),
-                        turn_marker=auditor_marker,
+                        worker_id=browser_worker["worker_id"],
+                        message=self._browser_message(changes),
+                        turn_marker=browser_marker,
                     )
-                    events.append({"action": "send_worker", "worker_id": auditor["worker_id"], "round": round_index})
-                    auditor_observation = self._wait_for_marker(
+                    events.append({"action": "send_worker", "worker_id": browser_worker["worker_id"], "round": round_index})
+                    browser_observation = self._wait_for_marker(
                         repo_root,
                         crew_id,
-                        auditor["worker_id"],
+                        browser_worker["worker_id"],
                         interval,
-                        turn_marker=auditor_marker,
+                        turn_marker=browser_marker,
                     )
                     events.append(
                         {
                             "action": "observe_worker",
                             "round": round_index,
-                            "worker_id": auditor["worker_id"],
-                            "marker_seen": auditor_observation.get("marker_seen", False),
+                            "worker_id": browser_worker["worker_id"],
+                            "marker_seen": browser_observation.get("marker_seen", False),
                         }
                     )
-                    if not auditor_observation.get("marker_seen", False):
-                        return self._waiting_result(crew_id, auditor["worker_id"], events)
-                    raw_artifact = auditor.get("transcript_artifact", "")
-                    review_verdict = self._review_parser.parse(
-                        auditor_observation.get("snapshot", ""),
-                        evidence_refs=[raw_artifact] if raw_artifact else [],
-                        raw_artifact=raw_artifact,
-                    )
-                    review_artifact = self._write_json_artifact_if_supported(
-                        crew_id=crew_id,
-                        artifact_name=f"workers/{auditor['worker_id']}/review_verdict.json",
-                        payload=review_verdict.to_dict(),
-                    )
-                    events.append(
-                        {
-                            "action": "review_verdict_parsed",
-                            "round": round_index,
-                            "worker_id": auditor["worker_id"],
-                            "status": review_verdict.status,
-                            "artifact": review_artifact,
-                        }
-                    )
-                    self._record_blackboard_if_supported(
-                        crew_id=crew_id,
-                        entry_type="review",
-                        content=f"Review verdict {review_verdict.status}: {review_verdict.summary}",
-                        evidence_refs=[
-                            ref
-                            for ref in [review_artifact, *review_verdict.evidence_refs]
-                            if ref
-                        ],
-                    )
-                    if review_verdict.status == "unknown":
-                        report, readiness_artifact = self._write_readiness_report(
-                            crew_id=crew_id,
-                            round_index=round_index,
-                            worker=source_worker,
-                            changes=changes,
-                            scope_result=scope_result,
-                            review_verdict=review_verdict,
-                        )
-                        return {
-                            "crew_id": crew_id,
-                            "status": "needs_human",
-                            "reason": "review_verdict_unknown",
-                            "rounds": round_index,
-                            "events": events,
-                            "readiness_artifact": readiness_artifact,
-                            "readiness_status": report.status,
-                        }
-                    if review_verdict.status == "block":
-                        summary = self._review_challenge_message(review_verdict)
-                        self._controller.challenge(crew_id=crew_id, summary=summary)
-                        events.append({"action": "challenge", "round": round_index, "summary": summary})
-                        continue
-                    review_status = review_verdict.status
-                    browser_action = policy.decide(
-                        {
-                            "crew_id": crew_id,
-                            "goal": details.get("crew", {}).get("root_goal", ""),
-                            "workers": self._controller.status(repo_root=repo_root, crew_id=crew_id).get("workers", []),
-                            "changed_files": changes.get("changed_files", []),
-                            "review_status": review_status,
-                            "browser_check_status": None,
-                            "verification_failures": verification_failures,
-                            "repo_write_scope": repo_write_scope,
-                        }
-                    )
-                    if browser_action.action_type is DecisionActionType.SPAWN_WORKER and browser_action.contract is not None:
-                        self._record_decision_if_supported(crew_id, browser_action.to_dict())
-                        browser_worker = self._controller.ensure_worker(
-                            repo_root=repo_root,
-                            crew_id=crew_id,
-                            contract=browser_action.contract,
-                            allow_dirty_base=False,
-                        )
-                        events.append(
-                            {
-                                "action": "spawn_worker",
-                                "worker_id": browser_worker["worker_id"],
-                                "contract_id": browser_action.contract.contract_id,
-                                "label": browser_action.contract.label,
-                                "reason": browser_action.reason,
-                            }
-                        )
-                        browser_marker = self._turn_marker(crew_id, browser_worker["worker_id"], "dynamic-browser", round_index)
-                        self._controller.send_worker(
-                            repo_root=repo_root,
-                            crew_id=crew_id,
-                            worker_id=browser_worker["worker_id"],
-                            message=self._browser_message(changes),
-                            turn_marker=browser_marker,
-                        )
-                        events.append({"action": "send_worker", "worker_id": browser_worker["worker_id"], "round": round_index})
-                        browser_observation = self._wait_for_marker(
-                            repo_root,
-                            crew_id,
-                            browser_worker["worker_id"],
-                            interval,
-                            turn_marker=browser_marker,
-                        )
-                        events.append(
-                            {
-                                "action": "observe_worker",
-                                "round": round_index,
-                                "worker_id": browser_worker["worker_id"],
-                                "marker_seen": browser_observation.get("marker_seen", False),
-                            }
-                        )
-                        if not browser_observation.get("marker_seen", False):
-                            return self._waiting_result(crew_id, browser_worker["worker_id"], events)
+                    if not browser_observation.get("marker_seen", False):
+                        return self._waiting_result(crew_id, browser_worker["worker_id"], events)
             verification_results = [
                 self._controller.verify(
                     crew_id=crew_id,
@@ -642,6 +665,18 @@ class CrewSupervisorLoop:
                 and item.get("status", "running") not in {"failed", "stopped"}
             ),
             None,
+        )
+
+    def _active_review_worker(self, details: dict[str, Any]) -> dict[str, Any] | None:
+        active_review_workers = [
+            worker
+            for worker in details.get("workers", [])
+            if worker.get("status", "running") not in {"failed", "stopped"}
+            and "review_patch" in worker.get("capabilities", [])
+        ]
+        return next(
+            (worker for worker in active_review_workers if worker.get("label") == "patch-risk-auditor"),
+            active_review_workers[0] if active_review_workers else None,
         )
 
     def _has_worker_capability(self, details: dict[str, Any], capability: str) -> bool:
