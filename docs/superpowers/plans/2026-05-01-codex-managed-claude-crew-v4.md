@@ -771,8 +771,12 @@ git commit -m "feat: add v4 runtime adapter models"
 ## Task 5: Turn Service and Idempotency Guard
 
 **Files:**
+- Modify: `src/codex_claude_orchestrator/v4/event_store.py`
 - Create: `src/codex_claude_orchestrator/v4/turns.py`
+- Modify: `tests/v4/test_event_store.py`
 - Create: `tests/v4/test_turns.py`
+
+**Execution correction:** Delivery ownership must be durable, not only process-local. Add an atomic event-store claim helper such as `append_claim(...) -> tuple[AgentEvent, bool]`, where `bool` is true only when the event was newly inserted. `TurnService` must claim `turn.delivery_started` before calling the adapter. If another process already claimed the same attempt and no terminal delivered/failed event exists, return an in-progress result and do not send the turn again. Attempt-specific `turn.requested` and `turn.delivery_started` keys are required; `turn.delivered` remains the logical-turn success dedupe key. Failed same-attempt replay must return the stored failure, including stored marker.
 
 - [ ] **Step 1: Write failing turn service tests**
 
