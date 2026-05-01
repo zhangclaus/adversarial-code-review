@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 
 from codex_claude_orchestrator.v4.events import AgentEvent
 
+_TERMINAL_CREW_STATUSES = {"ready", "needs_human", "accepted"}
+
 
 @dataclass(slots=True)
 class TurnProjection:
@@ -37,7 +39,8 @@ class CrewProjection:
                     status=event.type.split(".", 1)[1],
                     last_event_type=event.type,
                 )
-                projection.status = "running"
+                if projection.status not in _TERMINAL_CREW_STATUSES:
+                    projection.status = "running"
             if event.type == "crew.ready_for_accept":
                 projection.status = "ready"
             if event.type == "human.required":
