@@ -650,6 +650,57 @@ def test_supervisor_loop_dynamic_unknown_review_returns_needs_human(tmp_path: Pa
     assert any(item["artifact_name"] == "readiness/round-1.json" for item in controller.artifacts)
 
 
+def test_supervisor_loop_dynamic_review_parses_transcript_when_marker_not_in_snapshot(tmp_path: Path):
+    controller = FakeController([{"passed": True, "summary": "command passed: exit code 0"}])
+    controller.status_payload = {"crew": {"crew_id": "crew-1", "root_goal": "Refactor public API"}, "workers": []}
+
+    def observe_transcript_backed_review(**kwargs):
+        controller.observed.append(kwargs)
+        marker = kwargs.get("turn_marker") or "<<<CODEX_TURN_DONE status=ready_for_codex>>>"
+        if kwargs["worker_id"] == "worker-patch-risk-auditor":
+            return {
+                "snapshot": "last pane lines without review",
+                "marker_seen": False,
+                "transcript": "\n".join(
+                    [
+                        "Auditor done",
+                        "<<<CODEX_REVIEW",
+                        "verdict: OK",
+                        "summary: Patch looks safe.",
+                        "findings:",
+                        "- Tests cover the changed path.",
+                        ">>>",
+                        marker,
+                    ]
+                ),
+                "transcript_artifact": "workers/worker-patch-risk-auditor/transcript.txt",
+            }
+        return {"snapshot": f"{kwargs['worker_id']} done\n{marker}", "marker_seen": True}
+
+    controller.observe_worker = observe_transcript_backed_review
+    loop = CrewSupervisorLoop(controller=controller, poll_interval_seconds=0, max_observe_attempts=1)
+
+    result = loop.run(
+        repo_root=tmp_path,
+        goal="Refactor public API",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+        spawn_policy="dynamic",
+    )
+
+    review_artifact = next(
+        item
+        for item in controller.artifacts
+        if item["artifact_name"] == "workers/worker-patch-risk-auditor/review_verdict.json"
+    )
+    assert result["status"] == "ready_for_codex_accept"
+    assert controller.verify_called
+    assert controller.decisions[-1]["reason"] == "verification passed and dynamic checks completed"
+    assert review_artifact["payload"]["status"] == "ok"
+    assert review_artifact["payload"]["raw_artifact"] == "workers/worker-patch-risk-auditor/transcript.txt"
+    assert review_artifact["payload"]["evidence_refs"] == ["workers/worker-patch-risk-auditor/transcript.txt"]
+
+
 def test_supervisor_loop_dynamic_requires_fresh_review_after_prior_block(tmp_path: Path):
     controller = FakeController([{"passed": True, "summary": "command passed: exit code 0"}])
     controller.status_payload = {"crew": {"crew_id": "crew-1", "root_goal": "Refactor public API"}, "workers": []}

@@ -339,9 +339,9 @@ class CrewSupervisorLoop:
                 )
                 if not auditor_observation.get("marker_seen", False):
                     return self._waiting_result(crew_id, auditor["worker_id"], events)
-                raw_artifact = auditor.get("transcript_artifact", "")
-                current_turn_text = self._current_turn_text(
-                    auditor_observation.get("snapshot", ""),
+                raw_artifact = auditor_observation.get("transcript_artifact") or auditor.get("transcript_artifact", "")
+                current_turn_text = self._current_turn_observation_text(
+                    auditor_observation,
                     auditor_marker,
                 )
                 review_verdict = self._review_parser.parse(
@@ -753,6 +753,16 @@ class CrewSupervisorLoop:
         if prior_marker_end == -1:
             return before_marker[prior_marker_start + len(_TURN_DONE_PREFIX):]
         return before_marker[prior_marker_end + len(">>>"):]
+
+    def _current_turn_observation_text(self, observation: dict[str, Any], expected_marker: str) -> str:
+        snapshot = observation.get("snapshot", "")
+        snapshot_current_turn = self._current_turn_text(snapshot, expected_marker)
+        if expected_marker in snapshot and "<<<CODEX_REVIEW" in snapshot_current_turn:
+            return snapshot_current_turn
+        transcript = observation.get("transcript", "")
+        if transcript:
+            return self._current_turn_text(transcript, expected_marker)
+        return snapshot_current_turn
 
     def _has_worker_capability(self, details: dict[str, Any], capability: str) -> bool:
         return any(
