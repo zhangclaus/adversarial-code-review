@@ -13,7 +13,13 @@ class OutputIngestor:
         prior_end = -1
         while prior_start != -1:
             prior_end = before_marker.find(">>>", prior_start)
-            if prior_end != -1:
+            newline = before_marker.find("\n", prior_start)
+            carriage_return = before_marker.find("\r", prior_start)
+            line_end_candidates = [
+                index for index in (newline, carriage_return) if index != -1
+            ]
+            line_end = min(line_end_candidates) if line_end_candidates else -1
+            if prior_end != -1 and (line_end == -1 or prior_end < line_end):
                 break
             prior_start = before_marker.rfind(TURN_DONE_PREFIX, 0, prior_start)
         if prior_start == -1 or prior_end == -1:

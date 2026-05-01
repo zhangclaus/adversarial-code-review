@@ -31,6 +31,18 @@ def test_output_ingestor_ignores_incomplete_current_marker():
     assert current == text
 
 
+def test_output_ingestor_ignores_multiline_incomplete_marker():
+    ingestor = OutputIngestor()
+    text = "current output\n<<<CODEX_TURN_DONE\nnot marker >>>\nkeep me\n"
+
+    current = ingestor.current_turn_text(
+        text,
+        expected_marker="<<<CODEX_TURN_DONE crew=crew-1 worker=w phase=review round=2>>>",
+    )
+
+    assert current == text
+
+
 def test_output_ingestor_handles_empty_expected_marker():
     ingestor = OutputIngestor()
     text = (
