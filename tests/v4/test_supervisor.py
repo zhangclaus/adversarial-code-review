@@ -325,6 +325,7 @@ def test_v4_supervisor_resume_does_not_redeliver_completed_turn(tmp_path: Path):
     assert first_result["status"] == "turn_completed"
     assert resumed_result["status"] == "turn_completed"
     assert adapter.delivered == ["round-1-worker-1-source"]
+    assert adapter.watched == ["round-1-worker-1-source"]
     assert [event.type for event in events].count("turn.completed") == 1
 
 
