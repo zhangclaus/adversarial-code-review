@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -29,13 +29,13 @@ class AgentEvent:
     stream_id: str
     sequence: int
     type: str
-    crew_id: str | None = None
-    worker_id: str | None = None
-    turn_id: str | None = None
-    idempotency_key: str | None = None
-    payload: dict[str, Any] | None = None
-    artifact_refs: list[str] | None = None
-    created_at: str | None = None
+    crew_id: str = ""
+    worker_id: str = ""
+    turn_id: str = ""
+    idempotency_key: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    artifact_refs: list[str] = field(default_factory=list)
+    created_at: str = ""
 
     def __post_init__(self) -> None:
         if not self.event_id:

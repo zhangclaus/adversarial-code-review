@@ -55,6 +55,29 @@ def test_agent_event_to_dict_normalizes_nested_values() -> None:
     }
 
 
+def test_agent_event_to_dict_includes_stable_default_values() -> None:
+    event = AgentEvent(
+        event_id="evt-1",
+        stream_id="crew-1",
+        sequence=1,
+        type="crew.started",
+    )
+
+    assert event.to_dict() == {
+        "event_id": "evt-1",
+        "stream_id": "crew-1",
+        "sequence": 1,
+        "type": "crew.started",
+        "crew_id": "",
+        "worker_id": "",
+        "turn_id": "",
+        "idempotency_key": "",
+        "payload": {},
+        "artifact_refs": [],
+        "created_at": "",
+    }
+
+
 def test_agent_event_rejects_missing_type() -> None:
     with pytest.raises(ValueError, match="type is required"):
         AgentEvent(event_id="evt-1", stream_id="stream-1", sequence=1, type="")
