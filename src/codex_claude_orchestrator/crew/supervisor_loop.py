@@ -8,6 +8,7 @@ from codex_claude_orchestrator.crew.decision_policy import CrewDecisionPolicy
 from codex_claude_orchestrator.crew.gates import GateResult, WriteScopeGate
 from codex_claude_orchestrator.crew.models import DecisionAction, DecisionActionType, WorkerRole
 from codex_claude_orchestrator.crew.readiness import CrewReadinessEvaluator
+from codex_claude_orchestrator.crew.review_verdict import ReviewVerdict, ReviewVerdictParser
 from codex_claude_orchestrator.workers.selection import WorkerSelectionPolicy
 
 
@@ -20,12 +21,14 @@ class CrewSupervisorLoop:
         max_observe_attempts: int = 60,
         scope_gate: WriteScopeGate | None = None,
         readiness_evaluator: CrewReadinessEvaluator | None = None,
+        review_parser: ReviewVerdictParser | None = None,
     ):
         self._controller = controller
         self._poll_interval_seconds = poll_interval_seconds
         self._max_observe_attempts = max_observe_attempts
         self._scope_gate = scope_gate or WriteScopeGate()
         self._readiness_evaluator = readiness_evaluator or CrewReadinessEvaluator()
+        self._review_parser = review_parser or ReviewVerdictParser()
 
     def run(
         self,
@@ -300,7 +303,60 @@ class CrewSupervisorLoop:
                     )
                     if not auditor_observation.get("marker_seen", False):
                         return self._waiting_result(crew_id, auditor["worker_id"], events)
-                    review_status = "ok"
+                    raw_artifact = auditor.get("transcript_artifact", "")
+                    review_verdict = self._review_parser.parse(
+                        auditor_observation.get("snapshot", ""),
+                        evidence_refs=[raw_artifact] if raw_artifact else [],
+                        raw_artifact=raw_artifact,
+                    )
+                    review_artifact = self._write_json_artifact_if_supported(
+                        crew_id=crew_id,
+                        artifact_name=f"workers/{auditor['worker_id']}/review_verdict.json",
+                        payload=review_verdict.to_dict(),
+                    )
+                    events.append(
+                        {
+                            "action": "review_verdict_parsed",
+                            "round": round_index,
+                            "worker_id": auditor["worker_id"],
+                            "status": review_verdict.status,
+                            "artifact": review_artifact,
+                        }
+                    )
+                    self._record_blackboard_if_supported(
+                        crew_id=crew_id,
+                        entry_type="review",
+                        content=f"Review verdict {review_verdict.status}: {review_verdict.summary}",
+                        evidence_refs=[
+                            ref
+                            for ref in [review_artifact, *review_verdict.evidence_refs]
+                            if ref
+                        ],
+                    )
+                    if review_verdict.status == "unknown":
+                        report, readiness_artifact = self._write_readiness_report(
+                            crew_id=crew_id,
+                            round_index=round_index,
+                            worker=source_worker,
+                            changes=changes,
+                            scope_result=scope_result,
+                            review_verdict=review_verdict,
+                        )
+                        return {
+                            "crew_id": crew_id,
+                            "status": "needs_human",
+                            "reason": "review_verdict_unknown",
+                            "rounds": round_index,
+                            "events": events,
+                            "readiness_artifact": readiness_artifact,
+                            "readiness_status": report.status,
+                        }
+                    if review_verdict.status == "block":
+                        summary = self._review_challenge_message(review_verdict)
+                        self._controller.challenge(crew_id=crew_id, summary=summary)
+                        events.append({"action": "challenge", "round": round_index, "summary": summary})
+                        continue
+                    review_status = review_verdict.status
                     browser_action = policy.decide(
                         {
                             "crew_id": crew_id,
@@ -670,6 +726,7 @@ class CrewSupervisorLoop:
         worker: dict[str, Any],
         changes: dict[str, Any],
         scope_result: GateResult,
+        review_verdict: ReviewVerdict | None = None,
     ):
         report = self._readiness_evaluator.evaluate(
             round_id=f"round-{round_index}",
@@ -677,7 +734,7 @@ class CrewSupervisorLoop:
             contract_id=worker.get("contract_id", ""),
             changed_files=changes.get("changed_files", []),
             scope_result=scope_result,
-            review_verdict=None,
+            review_verdict=review_verdict,
             verification_results=[],
         )
         artifact_name = self._write_json_artifact_if_supported(
@@ -701,7 +758,25 @@ class CrewSupervisorLoop:
     def _review_message(self, changes: dict[str, Any]) -> str:
         changed_files = ", ".join(changes.get("changed_files", [])) or "no changed files"
         diff_artifact = changes.get("diff_artifact", "")
-        return f"Review the implementer patch. Changed files: {changed_files}. Diff artifact: {diff_artifact}"
+        return (
+            f"Review the implementer patch. Changed files: {changed_files}. Diff artifact: {diff_artifact}\n\n"
+            "Return a parseable review block exactly in this shape:\n"
+            "<<<CODEX_REVIEW\n"
+            "verdict: OK | WARN | BLOCK\n"
+            "summary: one sentence\n"
+            "findings:\n"
+            "- finding text\n"
+            ">>>\n"
+            "Use BLOCK for correctness regressions, unsafe scope, or missing critical tests."
+        )
+
+    def _review_challenge_message(self, review_verdict: ReviewVerdict) -> str:
+        lines = [f"Review BLOCK: {review_verdict.summary}"]
+        if review_verdict.findings:
+            lines.append("Findings:")
+            lines.extend(f"- {finding}" for finding in review_verdict.findings)
+        lines.append("Fix these review blockers before verification.")
+        return "\n".join(lines)
 
     def _browser_message(self, changes: dict[str, Any]) -> str:
         changed_files = ", ".join(changes.get("changed_files", [])) or "no changed files"

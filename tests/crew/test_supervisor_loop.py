@@ -47,6 +47,22 @@ class FakeController:
     def observe_worker(self, **kwargs):
         self.observed.append(kwargs)
         marker = kwargs.get("turn_marker") or "<<<CODEX_TURN_DONE status=ready_for_codex>>>"
+        if kwargs["worker_id"] == "worker-patch-risk-auditor":
+            return {
+                "snapshot": "\n".join(
+                    [
+                        f"{kwargs['worker_id']} done",
+                        "<<<CODEX_REVIEW",
+                        "verdict: OK",
+                        "summary: Patch looks safe.",
+                        "findings:",
+                        "- Tests cover the changed path.",
+                        ">>>",
+                        marker,
+                    ]
+                ),
+                "marker_seen": True,
+            }
         return {"snapshot": f"{kwargs['worker_id']} done\n{marker}", "marker_seen": True}
 
     def send_worker(self, **kwargs):
@@ -394,6 +410,85 @@ def test_supervisor_loop_dynamic_spawns_browser_tester_for_ui_goal_after_review(
     assert spawned_labels == ["targeted-code-editor", "patch-risk-auditor", "browser-flow-tester"]
     assert any(call["worker_id"] == "worker-browser-flow-tester" for call in controller.sent)
     assert any(event.get("label") == "browser-flow-tester" for event in result["events"])
+
+
+def test_supervisor_loop_dynamic_review_block_challenges_source_and_skips_verification(tmp_path: Path):
+    controller = FakeController([{"passed": True, "summary": "command passed: exit code 0"}])
+    controller.status_payload = {"crew": {"crew_id": "crew-1", "root_goal": "Refactor public API"}, "workers": []}
+
+    def observe_review_block(**kwargs):
+        controller.observed.append(kwargs)
+        marker = kwargs.get("turn_marker") or "<<<CODEX_TURN_DONE status=ready_for_codex>>>"
+        if kwargs["worker_id"] == "worker-patch-risk-auditor":
+            return {
+                "snapshot": "\n".join(
+                    [
+                        "Auditor done",
+                        "<<<CODEX_REVIEW",
+                        "verdict: BLOCK",
+                        "summary: Regression in public API.",
+                        "findings:",
+                        "- Public method now returns None.",
+                        ">>>",
+                        marker,
+                    ]
+                ),
+                "marker_seen": True,
+            }
+        return {"snapshot": f"{kwargs['worker_id']} done\n{marker}", "marker_seen": True}
+
+    controller.observe_worker = observe_review_block
+    loop = CrewSupervisorLoop(controller=controller, poll_interval_seconds=0, max_observe_attempts=1)
+
+    result = loop.run(
+        repo_root=tmp_path,
+        goal="Refactor public API",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+        spawn_policy="dynamic",
+    )
+
+    assert result["status"] == "max_rounds_exhausted"
+    assert controller.verify_called == []
+    assert controller.challenge_called[0]["summary"].startswith("Review BLOCK: Regression in public API.")
+    assert "Public method now returns None." in controller.challenge_called[0]["summary"]
+    assert any(
+        item["artifact_name"] == "workers/worker-patch-risk-auditor/review_verdict.json"
+        for item in controller.artifacts
+    )
+
+
+def test_supervisor_loop_dynamic_unknown_review_returns_needs_human(tmp_path: Path):
+    controller = FakeController([{"passed": True, "summary": "command passed: exit code 0"}])
+    controller.status_payload = {"crew": {"crew_id": "crew-1", "root_goal": "Refactor public API"}, "workers": []}
+
+    def observe_unknown_review(**kwargs):
+        controller.observed.append(kwargs)
+        marker = kwargs.get("turn_marker") or "<<<CODEX_TURN_DONE status=ready_for_codex>>>"
+        if kwargs["worker_id"] == "worker-patch-risk-auditor":
+            return {"snapshot": f"Auditor cannot decide yet\n{marker}", "marker_seen": True}
+        return {"snapshot": f"{kwargs['worker_id']} done\n{marker}", "marker_seen": True}
+
+    controller.observe_worker = observe_unknown_review
+    loop = CrewSupervisorLoop(controller=controller, poll_interval_seconds=0, max_observe_attempts=1)
+
+    result = loop.run(
+        repo_root=tmp_path,
+        goal="Refactor public API",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+        spawn_policy="dynamic",
+    )
+
+    assert result["status"] == "needs_human"
+    assert result["reason"] == "review_verdict_unknown"
+    assert result["readiness_artifact"] == "readiness/round-1.json"
+    assert controller.verify_called == []
+    assert any(
+        item["artifact_name"] == "workers/worker-patch-risk-auditor/review_verdict.json"
+        for item in controller.artifacts
+    )
+    assert any(item["artifact_name"] == "readiness/round-1.json" for item in controller.artifacts)
 
 
 def test_supervisor_loop_dynamic_records_known_pitfall_and_spawns_guardrail_after_three_failures(tmp_path: Path):
