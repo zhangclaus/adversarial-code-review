@@ -147,7 +147,7 @@ def test_v4_supervisor_returns_waiting_when_delivery_already_in_progress(tmp_pat
     assert adapter.watched == []
 
 
-def test_v4_supervisor_appends_changed_runtime_observation_on_repeat(tmp_path: Path):
+def test_v4_supervisor_preserves_inconclusive_turn_on_repeat(tmp_path: Path):
     store = SQLiteEventStore(tmp_path / "events.sqlite3")
     watches = [
         [{"text": "still working"}],
@@ -166,29 +166,37 @@ def test_v4_supervisor_appends_changed_runtime_observation_on_repeat(tmp_path: P
             for payload in payloads
         ]
 
+    adapter = FakeAdapter(events_for_turn)
     supervisor = V4Supervisor(
         event_store=store,
         artifact_store=ArtifactStore(tmp_path / "artifacts"),
-        adapter=FakeAdapter(events_for_turn),
+        adapter=adapter,
     )
 
-    for _ in range(2):
-        result = supervisor.run_source_turn(
-            crew_id="crew-1",
-            goal="Fix tests",
-            worker_id="worker-1",
-            round_id="round-1",
-            message="Implement",
-            expected_marker="marker-1",
-        )
+    first_result = supervisor.run_source_turn(
+        crew_id="crew-1",
+        goal="Fix tests",
+        worker_id="worker-1",
+        round_id="round-1",
+        message="Implement",
+        expected_marker="marker-1",
+    )
+    second_result = supervisor.run_source_turn(
+        crew_id="crew-1",
+        goal="Fix tests",
+        worker_id="worker-1",
+        round_id="round-1",
+        message="Implement",
+        expected_marker="marker-1",
+    )
 
     events = store.list_stream("crew-1")
-    assert result["status"] == "turn_completed"
-    assert any(
-        event.type == "output.chunk" and event.payload == {"text": "done marker-1"}
-        for event in events
-    )
-    assert any(event.type == "turn.completed" for event in events)
+    assert first_result["status"] == "waiting"
+    assert second_result["status"] == "waiting"
+    assert second_result["reason"] == "completion evidence not found"
+    assert len(adapter.watched) == 1
+    assert len(adapter.delivered) == 1
+    assert not any(event.type == "turn.completed" for event in events)
 
 
 def test_v4_supervisor_dedupes_identical_runtime_observation_on_repeat(tmp_path: Path):
@@ -221,6 +229,56 @@ def test_v4_supervisor_dedupes_identical_runtime_observation_on_repeat(tmp_path:
         )
 
     assert [event.type for event in store.list_stream("crew-1")].count("output.chunk") == 1
+
+
+def test_v4_supervisor_preserves_completed_turn_on_repeat(tmp_path: Path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    watches = [
+        [{"text": "done marker-1"}],
+        [],
+    ]
+
+    def events_for_turn(turn: TurnEnvelope):
+        payloads = watches.pop(0)
+        return [
+            RuntimeEvent(
+                type="output.chunk",
+                turn_id=turn.turn_id,
+                worker_id=turn.worker_id,
+                payload=payload,
+            )
+            for payload in payloads
+        ]
+
+    adapter = FakeAdapter(events_for_turn)
+    supervisor = V4Supervisor(
+        event_store=store,
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+        adapter=adapter,
+    )
+
+    first_result = supervisor.run_source_turn(
+        crew_id="crew-1",
+        goal="Fix tests",
+        worker_id="worker-1",
+        round_id="round-1",
+        message="Implement",
+        expected_marker="marker-1",
+    )
+    second_result = supervisor.run_source_turn(
+        crew_id="crew-1",
+        goal="Fix tests",
+        worker_id="worker-1",
+        round_id="round-1",
+        message="Implement",
+        expected_marker="marker-1",
+    )
+
+    assert first_result["status"] == "turn_completed"
+    assert second_result["status"] == "turn_completed"
+    assert len(adapter.watched) == 1
+    assert len(adapter.delivered) == 1
+    assert [event.type for event in store.list_stream("crew-1")].count("turn.inconclusive") == 0
 
 
 def test_v4_supervisor_ignores_mismatched_runtime_events(tmp_path: Path):

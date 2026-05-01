@@ -51,7 +51,15 @@ class V4Supervisor:
             expected_marker=expected_marker,
         )
 
+        terminal_result = self._terminal_result(crew_id=crew_id, turn=turn)
+        if terminal_result is not None:
+            return terminal_result
+
         delivery_result = self._turns.request_and_deliver(turn)
+        terminal_result = self._terminal_result(crew_id=crew_id, turn=turn)
+        if terminal_result is not None:
+            return terminal_result
+
         if not delivery_result.delivered:
             status = (
                 "waiting"
@@ -85,6 +93,10 @@ class V4Supervisor:
                 artifact_refs=runtime_event.artifact_refs,
             )
 
+        terminal_result = self._terminal_result(crew_id=crew_id, turn=turn)
+        if terminal_result is not None:
+            return terminal_result
+
         decision = self._completion.evaluate(turn, runtime_events)
         self._events.append(
             stream_id=crew_id,
@@ -108,6 +120,44 @@ class V4Supervisor:
     @staticmethod
     def _is_current_turn_event(turn: TurnEnvelope, event: RuntimeEvent) -> bool:
         return event.turn_id == turn.turn_id and event.worker_id == turn.worker_id
+
+    def _terminal_result(self, *, crew_id: str, turn: TurnEnvelope) -> dict[str, str] | None:
+        for event in reversed(self._events.list_by_turn(turn.turn_id)):
+            if event.type == "turn.completed":
+                return {
+                    "crew_id": crew_id,
+                    "status": "turn_completed",
+                    "turn_id": turn.turn_id,
+                }
+            if event.type == "turn.inconclusive":
+                return {
+                    "crew_id": crew_id,
+                    "status": "waiting",
+                    "turn_id": turn.turn_id,
+                    "reason": event.payload.get("reason", ""),
+                }
+            if event.type == "turn.failed":
+                return {
+                    "crew_id": crew_id,
+                    "status": "turn_failed",
+                    "turn_id": turn.turn_id,
+                    "reason": event.payload.get("reason", ""),
+                }
+            if event.type == "turn.timeout":
+                return {
+                    "crew_id": crew_id,
+                    "status": "turn_timeout",
+                    "turn_id": turn.turn_id,
+                    "reason": event.payload.get("reason", ""),
+                }
+            if event.type == "turn.cancelled":
+                return {
+                    "crew_id": crew_id,
+                    "status": "turn_cancelled",
+                    "turn_id": turn.turn_id,
+                    "reason": event.payload.get("reason", ""),
+                }
+        return None
 
 
 def _runtime_event_digest(event: RuntimeEvent, *, index: int) -> str:
