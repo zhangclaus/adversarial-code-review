@@ -45,6 +45,35 @@ def test_tmux_adapter_delivers_turn_to_native_session():
     assert native.sent[0]["turn_marker"] == "marker-1"
 
 
+def test_tmux_adapter_includes_turn_context_in_delivered_message():
+    native = FakeNativeSession()
+    adapter = ClaudeCodeTmuxAdapter(native_session=native)
+    turn = TurnEnvelope(
+        crew_id="crew-1",
+        worker_id="worker-1",
+        turn_id="turn-1",
+        round_id="round-1",
+        phase="source",
+        message="Implement",
+        expected_marker="marker-1",
+        unread_inbox_digest="- [msg-1] question from codex: review this",
+        unread_message_ids=["msg-1"],
+        open_protocol_requests=[{"request_id": "req-1", "subject": "Review patch"}],
+        open_protocol_requests_digest="- [req-1] review from codex: Review patch",
+    )
+
+    adapter.deliver_turn(turn)
+
+    sent_message = native.sent[0]["message"]
+    assert "Implement" in sent_message
+    assert "Unread inbox" in sent_message
+    assert "msg-1" in sent_message
+    assert "Open protocol requests" in sent_message
+    assert "req-1" in sent_message
+    assert "Required outbox identity" in sent_message
+    assert "turn-1" in sent_message
+
+
 def test_tmux_adapter_unregistered_worker_uses_worker_id_as_terminal_pane():
     native = FakeNativeSession()
     adapter = ClaudeCodeTmuxAdapter(native_session=native)

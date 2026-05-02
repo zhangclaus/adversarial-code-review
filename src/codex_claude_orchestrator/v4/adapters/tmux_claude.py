@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from codex_claude_orchestrator.v4.runtime import (
     CancellationResult,
     DeliveryResult,
@@ -40,7 +42,7 @@ class ClaudeCodeTmuxAdapter:
         terminal_pane = _terminal_pane_for(turn, worker)
         result = self._native_session.send(
             terminal_pane=terminal_pane,
-            message=turn.message,
+            message=_compiled_turn_message(turn),
             turn_marker=turn.expected_marker,
         )
         marker = _non_empty_str(result.get("marker")) or turn.expected_marker
@@ -104,3 +106,50 @@ class ClaudeCodeTmuxAdapter:
             stopped=False,
             reason="worker stop is delegated to existing worker pool",
         )
+
+
+def _compiled_turn_message(turn: TurnEnvelope) -> str:
+    sections = [turn.message]
+    sections.append(
+        "\n".join(
+            [
+                "Required outbox identity:",
+                f"- crew_id: {turn.crew_id}",
+                f"- worker_id: {turn.worker_id}",
+                f"- turn_id: {turn.turn_id}",
+                f"- round_id: {turn.round_id}",
+                f"- contract_id: {turn.contract_id}",
+                f"- completion_mode: {turn.completion_mode}",
+            ]
+        )
+    )
+    if turn.unread_inbox_digest:
+        sections.append(
+            "\n".join(
+                [
+                    "Unread inbox:",
+                    turn.unread_inbox_digest,
+                    f"Acknowledge message ids in outbox: {', '.join(turn.unread_message_ids) or 'none'}",
+                ]
+            )
+        )
+    if turn.open_protocol_requests or turn.open_protocol_requests_digest:
+        sections.append(
+            "\n".join(
+                [
+                    "Open protocol requests:",
+                    turn.open_protocol_requests_digest or json.dumps(turn.open_protocol_requests, ensure_ascii=False),
+                ]
+            )
+        )
+    if turn.requires_structured_result:
+        sections.append(
+            "\n".join(
+                [
+                    "Structured result requirement:",
+                    "Write a valid outbox result for this exact turn before considering the turn complete.",
+                    "The outbox JSON must include crew_id, worker_id, turn_id, status, summary, changed_files, verification, acknowledged_message_ids, messages, risks, and next_suggested_action.",
+                ]
+            )
+        )
+    return "\n\n".join(section for section in sections if section)
