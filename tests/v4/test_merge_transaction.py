@@ -83,6 +83,48 @@ def test_merge_transaction_applies_patch_in_real_git_repo(tmp_path: Path) -> Non
     assert (repo_root / "src" / "app.py").read_text(encoding="utf-8") == "hello\n"
 
 
+def test_merge_transaction_ignores_in_repo_orchestrator_state_for_dirty_checks(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _run_git(["init"], repo_root)
+    _run_git(["config", "user.email", "codex@example.test"], repo_root)
+    _run_git(["config", "user.name", "Codex"], repo_root)
+    (repo_root / "src").mkdir()
+    (repo_root / "src" / "app.py").write_text("", encoding="utf-8")
+    _run_git(["add", "src/app.py"], repo_root)
+    _run_git(["commit", "-m", "base"], repo_root)
+    base_ref = _run_git(["rev-parse", "HEAD"], repo_root).stdout.strip()
+
+    (repo_root / "src" / "app.py").write_text("hello\n", encoding="utf-8")
+    patch = _run_git(["diff", "--binary", "HEAD"], repo_root).stdout
+    (repo_root / "src" / "app.py").write_text("", encoding="utf-8")
+    recorder = _crew_with_patch(
+        repo_root,
+        tmp_path,
+        base_ref=base_ref,
+        patch=patch,
+        state_root=repo_root / ".orchestrator",
+    )
+
+    result = V4MergeTransaction(
+        repo_root=repo_root,
+        recorder=recorder,
+        event_store=SQLiteEventStore(tmp_path / "events.sqlite3"),
+        stop_workers=lambda **_: {"stopped": True},
+    ).accept(
+        crew_id="crew-1",
+        summary="accepted",
+        verification_commands=[
+            f"{sys.executable} -c \"from pathlib import Path; assert Path('src/app.py').read_text() == 'hello\\\\n'\""
+        ],
+    )
+
+    assert result["status"] == "accepted"
+    assert (repo_root / "src" / "app.py").read_text(encoding="utf-8") == "hello\n"
+
+
 def test_merge_transaction_blocks_dirty_main_workspace(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -230,8 +272,9 @@ def _crew_with_patch(
     changed_files: list[str] | None = None,
     patch_path: str = "src/app.py",
     patch: str | None = None,
+    state_root: Path | None = None,
 ) -> CrewRecorder:
-    recorder = CrewRecorder(tmp_path / ".orchestrator")
+    recorder = CrewRecorder(state_root or tmp_path / ".orchestrator")
     recorder.start_crew(
         CrewRecord(
             crew_id="crew-1",

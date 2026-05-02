@@ -47,6 +47,7 @@ class V4MergeTransaction:
         self._git_runner = git_runner or subprocess.run
         self._command_runner = command_runner or subprocess.run
         self._stop_workers = stop_workers or (lambda **_: {})
+        self._state_root_status_prefix = self._compute_state_root_status_prefix()
 
     def accept(
         self,
@@ -291,7 +292,13 @@ class V4MergeTransaction:
         ]
 
     def _main_dirty(self) -> str:
-        return self._git(["status", "--porcelain"], cwd=self._repo_root).stdout.strip()
+        status = self._git(["status", "--porcelain"], cwd=self._repo_root).stdout
+        relevant_lines = [
+            line
+            for line in status.splitlines()
+            if line.strip() and not self._status_line_is_orchestrator_state(line)
+        ]
+        return "\n".join(relevant_lines).strip()
 
     def _main_head(self) -> str:
         return self._git(["rev-parse", "HEAD"], cwd=self._repo_root).stdout.strip()
@@ -327,6 +334,21 @@ class V4MergeTransaction:
             )
         return result
 
+    def _compute_state_root_status_prefix(self) -> str:
+        try:
+            relative = self._recorder._state_root.resolve().relative_to(self._repo_root)
+        except ValueError:
+            return ""
+        if relative == Path("."):
+            return ""
+        return relative.as_posix().rstrip("/")
+
+    def _status_line_is_orchestrator_state(self, line: str) -> bool:
+        if not self._state_root_status_prefix:
+            return False
+        paths = _status_line_paths(line)
+        return bool(paths) and all(_path_is_under(path, self._state_root_status_prefix) for path in paths)
+
 
 def _patch_paths(patch: str) -> list[str]:
     paths: list[str] = []
@@ -360,6 +382,23 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def _status_line_paths(line: str) -> list[str]:
+    if len(line) < 4:
+        return []
+    payload = line[3:].strip()
+    if " -> " in payload:
+        return [_unquote_status_path(path) for path in payload.split(" -> ") if path]
+    return [_unquote_status_path(payload)] if payload else []
+
+
+def _unquote_status_path(path: str) -> str:
+    return path.strip().strip('"').rstrip("/")
+
+
+def _path_is_under(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(f"{prefix}/")
 
 
 __all__ = ["V4MergeTransaction"]
