@@ -163,6 +163,11 @@ class SkillCandidateGate:
             candidate_id=candidate_id,
             payload=payload,
             artifact_refs=[artifact_ref],
+            idempotency_key=_idempotency_key(
+                self._paths.crew_id,
+                "skill.activated",
+                {"candidate_id": candidate_id, "activation_id": activation_id},
+            ),
         )
 
     def _append_decision(
@@ -187,6 +192,11 @@ class SkillCandidateGate:
             candidate_id=candidate_id,
             payload=payload,
             artifact_refs=[],
+            idempotency_key=_idempotency_key(
+                self._paths.crew_id,
+                event_type,
+                {"candidate_id": candidate_id, "decision": decision},
+            ),
         )
 
     def _append_candidate_event(
@@ -321,6 +331,11 @@ class GuardrailMemory:
             candidate_id=candidate_id,
             payload=payload,
             artifact_refs=[artifact_ref],
+            idempotency_key=_idempotency_key(
+                self._paths.crew_id,
+                "guardrail.activated",
+                {"candidate_id": candidate_id, "activation_id": activation_id},
+            ),
         )
 
     def _append_decision(
@@ -345,6 +360,11 @@ class GuardrailMemory:
             candidate_id=candidate_id,
             payload=payload,
             artifact_refs=[],
+            idempotency_key=_idempotency_key(
+                self._paths.crew_id,
+                event_type,
+                {"candidate_id": candidate_id, "decision": decision},
+            ),
         )
 
     def _append_candidate_event(
