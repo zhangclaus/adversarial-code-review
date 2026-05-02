@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from codex_claude_orchestrator.v4.adversarial_models import (
@@ -17,6 +18,9 @@ from codex_claude_orchestrator.v4.adversarial_models import (
 from codex_claude_orchestrator.v4.event_store_protocol import EventStore
 from codex_claude_orchestrator.v4.events import AgentEvent, normalize
 from codex_claude_orchestrator.v4.paths import V4Paths
+
+
+_worker_quality_projection_lock = Lock()
 
 
 class LearningRecorder:
@@ -150,6 +154,19 @@ class SkillCandidateGate:
     ) -> AgentEvent:
         artifact_path = self._paths.skill_candidate_path(candidate_id)
         artifact_ref = _require_artifact(self._paths, artifact_path)
+        idempotency_key = _idempotency_key(
+            self._paths.crew_id,
+            "skill.activated",
+            {"candidate_id": candidate_id, "activation_id": activation_id},
+        )
+        if existing := self._events.get_by_idempotency_key(idempotency_key):
+            return existing
+        _require_candidate_approved(
+            events=self._events,
+            crew_id=self._paths.crew_id,
+            candidate_id=candidate_id,
+            event_prefix="skill.",
+        )
         payload = ActivationPayload(
             candidate_id=candidate_id,
             activation_id=activation_id,
@@ -163,11 +180,7 @@ class SkillCandidateGate:
             candidate_id=candidate_id,
             payload=payload,
             artifact_refs=[artifact_ref],
-            idempotency_key=_idempotency_key(
-                self._paths.crew_id,
-                "skill.activated",
-                {"candidate_id": candidate_id, "activation_id": activation_id},
-            ),
+            idempotency_key=idempotency_key,
         )
 
     def _append_decision(
@@ -318,6 +331,19 @@ class GuardrailMemory:
     ) -> AgentEvent:
         artifact_path = self._paths.guardrail_candidate_path(candidate_id)
         artifact_ref = _require_artifact(self._paths, artifact_path)
+        idempotency_key = _idempotency_key(
+            self._paths.crew_id,
+            "guardrail.activated",
+            {"candidate_id": candidate_id, "activation_id": activation_id},
+        )
+        if existing := self._events.get_by_idempotency_key(idempotency_key):
+            return existing
+        _require_candidate_approved(
+            events=self._events,
+            crew_id=self._paths.crew_id,
+            candidate_id=candidate_id,
+            event_prefix="guardrail.",
+        )
         payload = ActivationPayload(
             candidate_id=candidate_id,
             activation_id=activation_id,
@@ -331,11 +357,7 @@ class GuardrailMemory:
             candidate_id=candidate_id,
             payload=payload,
             artifact_refs=[artifact_ref],
-            idempotency_key=_idempotency_key(
-                self._paths.crew_id,
-                "guardrail.activated",
-                {"candidate_id": candidate_id, "activation_id": activation_id},
-            ),
+            idempotency_key=idempotency_key,
         )
 
     def _append_decision(
@@ -413,7 +435,7 @@ class WorkerQualityTracker:
             source_event_ids=list(source_event_ids),
             expires_at=expires_at,
         ).to_payload()
-        event, created = self._events.append_claim(
+        event, _ = self._events.append_claim(
             stream_id=self._paths.crew_id,
             type="worker.quality_updated",
             crew_id=self._paths.crew_id,
@@ -426,29 +448,33 @@ class WorkerQualityTracker:
             payload=payload,
             artifact_refs=["learning/worker_quality.json"],
         )
-        if created:
-            self._apply_quality_delta(worker_id=worker_id, payload=payload)
+        self._rebuild_projection()
         return event
 
-    def _apply_quality_delta(self, *, worker_id: str, payload: dict[str, Any]) -> None:
-        path = self._paths.worker_quality_path
-        state = _read_json_object(path)
-        current = state.get(worker_id, {})
-        if not isinstance(current, dict):
-            current = {}
-        score = int(current.get("score", 0)) + int(payload["score_delta"])
-        current.update(
-            {
-                "worker_id": worker_id,
-                "score": score,
-                "last_score_delta": payload["score_delta"],
-                "reason_codes": payload["reason_codes"],
-                "source_event_ids": payload["source_event_ids"],
-                "expires_at": payload["expires_at"],
-            }
-        )
-        state[worker_id] = current
-        _write_json_atomic(path, state)
+    def _rebuild_projection(self) -> None:
+        with _worker_quality_projection_lock:
+            state: dict[str, Any] = {}
+            for event in self._events.list_stream(self._paths.crew_id):
+                if event.type != "worker.quality_updated":
+                    continue
+                payload = event.payload
+                worker_id = str(payload.get("worker_id") or event.worker_id)
+                if not worker_id:
+                    continue
+                current = state.get(worker_id, {"worker_id": worker_id, "score": 0})
+                score = int(current.get("score", 0)) + int(payload["score_delta"])
+                current.update(
+                    {
+                        "worker_id": worker_id,
+                        "score": score,
+                        "last_score_delta": payload["score_delta"],
+                        "reason_codes": payload["reason_codes"],
+                        "source_event_ids": payload["source_event_ids"],
+                        "expires_at": payload["expires_at"],
+                    }
+                )
+                state[worker_id] = current
+            _write_json_atomic(self._paths.worker_quality_path, state)
 
 
 def _artifact_ref(paths: V4Paths, artifact_path: Path) -> str:
@@ -461,6 +487,31 @@ def _require_artifact(paths: V4Paths, artifact_path: Path) -> str:
     return _artifact_ref(paths, artifact_path)
 
 
+def _require_candidate_approved(
+    *,
+    events: EventStore,
+    crew_id: str,
+    candidate_id: str,
+    event_prefix: str,
+) -> None:
+    state = ""
+    for event in events.list_stream(crew_id):
+        if not event.type.startswith(event_prefix):
+            continue
+        if event.payload.get("candidate_id") != candidate_id:
+            continue
+        if event.type.endswith(".candidate_created"):
+            state = "pending"
+        elif event.type.endswith(".approved"):
+            state = "approved"
+        elif event.type.endswith(".rejected"):
+            state = "rejected"
+        elif event.type.endswith(".activated"):
+            state = "activated"
+    if state != "approved":
+        raise ValueError("candidate is not approved")
+
+
 def _write_json_atomic(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp")
@@ -469,15 +520,6 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
         encoding="utf-8",
     )
     tmp_path.replace(path)
-
-
-def _read_json_object(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return data
 
 
 def _idempotency_key(crew_id: str, event_type: str, identity: dict[str, Any]) -> str:
