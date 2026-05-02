@@ -4,7 +4,14 @@ import hashlib
 import json
 from typing import Any
 
-from codex_claude_orchestrator.v4.adversarial_models import ChallengeIssuePayload, ChallengeSeverity
+from codex_claude_orchestrator.v4.adversarial_models import (
+    ChallengeIssuePayload,
+    ChallengeSeverity,
+    RepairCompletedPayload,
+    RepairOutcome,
+    RepairRequestPayload,
+    WorkerPolicy,
+)
 from codex_claude_orchestrator.v4.event_store_protocol import EventStore
 from codex_claude_orchestrator.v4.events import AgentEvent, normalize
 
@@ -115,6 +122,127 @@ class AdversarialEvaluator:
             }
         )
         return f"{source.crew_id}/{source.turn_id}/{event_type}/{digest}"
+
+    def _digest(self, value: dict[str, Any]) -> str:
+        content = json.dumps(normalize(value), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+class ChallengeManager:
+    def __init__(self, *, event_store: EventStore) -> None:
+        self._events = event_store
+
+    def request_repair(
+        self,
+        challenge_event: AgentEvent,
+        *,
+        repair_contract_id: str,
+        repair_turn_id: str,
+        worker_policy: WorkerPolicy | str,
+        allowed_write_scope: list[str],
+        acceptance_criteria: list[str],
+        required_outbox_path: str,
+    ) -> AgentEvent:
+        if challenge_event.type != "challenge.issued":
+            raise ValueError("repair can only be requested from challenge.issued")
+
+        challenge_id = str(challenge_event.payload.get("challenge_id", ""))
+        payload = RepairRequestPayload(
+            challenge_id=challenge_id,
+            repair_contract_id=repair_contract_id,
+            repair_turn_id=repair_turn_id,
+            worker_policy=WorkerPolicy(worker_policy),
+            allowed_write_scope=list(allowed_write_scope),
+            acceptance_criteria=list(acceptance_criteria),
+            required_outbox_path=required_outbox_path,
+        ).to_payload()
+        return self._events.append(
+            stream_id=challenge_event.crew_id,
+            type="repair.requested",
+            crew_id=challenge_event.crew_id,
+            worker_id=challenge_event.worker_id,
+            turn_id=repair_turn_id,
+            round_id=challenge_event.round_id,
+            contract_id=repair_contract_id,
+            idempotency_key=self._idempotency_key(
+                crew_id=challenge_event.crew_id,
+                challenge_id=challenge_id,
+                event_type="repair.requested",
+                payload=payload,
+                context={
+                    "worker_id": challenge_event.worker_id,
+                    "turn_id": repair_turn_id,
+                    "round_id": challenge_event.round_id,
+                    "contract_id": repair_contract_id,
+                },
+            ),
+            payload=payload,
+        )
+
+    def complete_repair(
+        self,
+        *,
+        crew_id: str,
+        worker_id: str,
+        round_id: str,
+        contract_id: str,
+        challenge_id: str,
+        repair_turn_id: str,
+        outcome: RepairOutcome | str,
+        verification_event_ids: list[str],
+        changed_files: list[str],
+        summary: str = "",
+    ) -> AgentEvent:
+        artifact_refs = list(changed_files)
+        payload = RepairCompletedPayload(
+            challenge_id=challenge_id,
+            repair_contract_id=contract_id,
+            repair_turn_id=repair_turn_id,
+            outcome=RepairOutcome(outcome),
+            summary=summary,
+            verification_event_ids=list(verification_event_ids),
+            artifact_refs=artifact_refs,
+        ).to_payload()
+        return self._events.append(
+            stream_id=crew_id,
+            type="repair.completed",
+            crew_id=crew_id,
+            worker_id=worker_id,
+            turn_id=repair_turn_id,
+            round_id=round_id,
+            contract_id=contract_id,
+            idempotency_key=self._idempotency_key(
+                crew_id=crew_id,
+                challenge_id=challenge_id,
+                event_type="repair.completed",
+                payload=payload,
+                context={
+                    "worker_id": worker_id,
+                    "turn_id": repair_turn_id,
+                    "round_id": round_id,
+                    "contract_id": contract_id,
+                },
+            ),
+            payload=payload,
+            artifact_refs=artifact_refs,
+        )
+
+    def _idempotency_key(
+        self,
+        *,
+        crew_id: str,
+        challenge_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        context: dict[str, Any],
+    ) -> str:
+        digest = self._digest(
+            {
+                "payload": payload,
+                "context": context,
+            }
+        )
+        return f"{crew_id}/{challenge_id}/{event_type}/{digest}"
 
     def _digest(self, value: dict[str, Any]) -> str:
         content = json.dumps(normalize(value), sort_keys=True, separators=(",", ":"))
