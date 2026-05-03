@@ -46,7 +46,7 @@ class AcceptReadinessDecision:
 
 
 class AcceptReadinessGate:
-    def __init__(self, *, event_store: EventStore) -> None:
+    def __init__(self, event_store: EventStore) -> None:
         self._events = event_store
 
     def evaluate(self, crew_id: str) -> AcceptReadinessDecision:

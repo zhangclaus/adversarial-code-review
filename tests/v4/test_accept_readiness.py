@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from codex_claude_orchestrator.v4.accept_readiness import AcceptReadinessGate
 from codex_claude_orchestrator.v4.event_store import SQLiteEventStore
 
@@ -7,7 +9,7 @@ from codex_claude_orchestrator.v4.event_store import SQLiteEventStore
 def test_accept_readiness_blocks_missing_ready_event(tmp_path):
     store = SQLiteEventStore(tmp_path / "events.sqlite3")
 
-    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+    decision = AcceptReadinessGate(store).evaluate("crew-1")
 
     assert decision.allowed is False
     assert decision.reason == "missing_ready_for_accept"
@@ -61,24 +63,100 @@ def test_accept_readiness_blocks_challenge_before_ready(tmp_path):
     assert decision.blocking_challenge_event_ids == [challenge.event_id]
 
 
-def test_accept_readiness_blocks_invalidating_event_after_ready(tmp_path):
+def test_accept_readiness_blocks_challenge_with_missing_severity_before_ready(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _review_completed(store, status="ok")
+    challenge = _challenge(store, severity=None)
+    _verification_passed(store)
+    _ready(store)
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is False
+    assert decision.reason == "blocking_challenge_open"
+    assert decision.blocking_challenge_event_ids == [challenge.event_id]
+
+
+def test_accept_readiness_ignores_non_blocking_challenge_before_ready(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _review_completed(store, status="ok")
+    _challenge(store, severity="warn")
+    _verification_passed(store)
+    _ready(store)
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is True
+    assert decision.reason == "ready"
+    assert decision.blocking_challenge_event_ids == []
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "human.required",
+        "turn.failed",
+        "turn.timeout",
+        "turn.inconclusive",
+        "verification.failed",
+        "challenge.issued",
+    ],
+)
+def test_accept_readiness_blocks_invalidating_events_after_ready(tmp_path, event_type):
     store = SQLiteEventStore(tmp_path / "events.sqlite3")
     _review_completed(store, status="warn")
     _verification_passed(store)
     _ready(store)
-    failed = store.append(
+    invalidating_event = store.append(
         stream_id="crew-1",
-        type="verification.failed",
+        type=event_type,
         crew_id="crew-1",
         round_id="round-1",
-        payload={"command": "pytest -q"},
+        payload={"severity": "block", "command": "pytest -q"},
     )
 
     decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
 
     assert decision.allowed is False
     assert decision.reason == "ready_invalidated_after_ready"
-    assert decision.invalidating_event_ids == [failed.event_id]
+    assert decision.invalidating_event_ids == [invalidating_event.event_id]
+
+
+@pytest.mark.parametrize("status", ["fail", "error", ""])
+def test_accept_readiness_rejects_non_acceptable_review_statuses(tmp_path, status):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _review_completed(store, status=status)
+    _verification_passed(store)
+    _ready(store)
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is False
+    assert decision.reason == "ready_round_missing_review"
+
+
+def test_accept_readiness_ignores_review_completed_after_ready(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _verification_passed(store)
+    _ready(store)
+    _review_completed(store, status="ok")
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is False
+    assert decision.reason == "ready_round_missing_review"
+
+
+def test_accept_readiness_ignores_verification_passed_after_ready(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _review_completed(store, status="ok")
+    _ready(store)
+    _verification_passed(store)
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is False
+    assert decision.reason == "ready_round_missing_verification"
 
 
 def test_accept_readiness_allows_latest_ready_round(tmp_path):
@@ -146,11 +224,14 @@ def _verification_passed(store, *, round_id="round-1"):
 
 
 def _challenge(store, *, round_id="round-1", severity="block"):
+    payload = {"finding": "review block"}
+    if severity is not None:
+        payload["severity"] = severity
     return store.append(
         stream_id="crew-1",
         type="challenge.issued",
         crew_id="crew-1",
         worker_id="worker-source",
         round_id=round_id,
-        payload={"severity": severity, "finding": "review block"},
+        payload=payload,
     )
