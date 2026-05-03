@@ -590,3 +590,60 @@ def test_find_compatible_worker_finds_idle_worker(tmp_path: Path):
 
     assert result is not None
     assert result["worker_id"] == "worker-explorer"
+
+
+def test_recover_stale_busy_workers_resets_to_idle(tmp_path: Path):
+    pool, crew, recorder = _make_pool_with_running_worker(tmp_path, status="busy")
+
+    # Simulate stale busy by directly patching the worker record in the JSONL file.
+    # (update_worker always sets updated_at to utc_now(), so we write directly.)
+    from datetime import UTC, datetime, timedelta
+    stale_time = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
+    path = tmp_path / "repo" / ".orchestrator" / "crews" / crew.crew_id / "workers.jsonl"
+    import json
+    workers = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for w in workers:
+        if w["worker_id"] == "worker-explorer":
+            w["updated_at"] = stale_time
+    path.write_text("".join(json.dumps(w) + "\n" for w in workers))
+
+    recovered = recorder.recover_stale_busy_workers(crew.crew_id, max_busy_seconds=300)
+
+    assert recovered == ["worker-explorer"]
+    worker = next(w for w in recorder.read_crew(crew.crew_id)["workers"] if w["worker_id"] == "worker-explorer")
+    assert worker["status"] == "idle"
+    event = recorder.read_crew(crew.crew_id)["events"][-1]
+    assert event["type"] == "worker_recovered"
+
+
+def test_recover_stale_busy_workers_ignores_fresh_busy(tmp_path: Path):
+    pool, crew, recorder = _make_pool_with_running_worker(tmp_path, status="busy")
+
+    # Worker is fresh — no recovery.
+    recovered = recorder.recover_stale_busy_workers(crew.crew_id, max_busy_seconds=300)
+
+    assert recovered == []
+    worker = next(w for w in recorder.read_crew(crew.crew_id)["workers"] if w["worker_id"] == "worker-explorer")
+    assert worker["status"] == "busy"
+
+
+def test_prune_orphans_recovers_stale_busy_workers(tmp_path: Path):
+    pool, crew, recorder = _make_pool_with_running_worker(tmp_path, status="busy")
+    recorder.update_crew(crew.crew_id, {"status": "running"})
+
+    from datetime import UTC, datetime, timedelta
+    import json
+    stale_time = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
+    path = tmp_path / "repo" / ".orchestrator" / "crews" / crew.crew_id / "workers.jsonl"
+    workers = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for w in workers:
+        if w["worker_id"] == "worker-explorer":
+            w["updated_at"] = stale_time
+    path.write_text("".join(json.dumps(w) + "\n" for w in workers))
+
+    result = pool.prune_orphans(repo_root=tmp_path)
+
+    assert "recovered_workers" in result
+    assert "worker-explorer" in result["recovered_workers"]
+    worker = next(w for w in recorder.read_crew(crew.crew_id)["workers"] if w["worker_id"] == "worker-explorer")
+    assert worker["status"] == "idle"

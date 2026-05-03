@@ -120,7 +120,6 @@ def test_controller_starts_crew_and_delegates_worker_terminal_commands(tmp_path:
     pruned = controller.prune_orphans(repo_root=repo_root)
 
     assert crew.status == CrewStatus.RUNNING
-    assert crew.active_worker_ids == ["worker-explorer", "worker-implementer"]
     assert pool.started[1][4] is False
     assert sent["marker_seen"] is True
     assert observed["snapshot"] == "Claude is reading files"

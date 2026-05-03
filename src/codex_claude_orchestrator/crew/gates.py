@@ -5,7 +5,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from codex_claude_orchestrator.crew.scope import is_protected as _is_protected_path, scope_covers
+from codex_claude_orchestrator.crew.scope import is_protected as _is_protected_path, normalize_path as _scope_normalize, scope_covers
+
+
+def _normalize_path(path: str | Path) -> str:
+    return _scope_normalize(str(path))
 
 
 DEFAULT_PROTECTED_PATTERNS = [
@@ -34,13 +38,6 @@ def _normalize(value: Any) -> Any:
     if isinstance(value, list):
         return [_normalize(inner) for inner in value]
     return value
-
-
-def _normalize_path(path: str | Path) -> str:
-    normalized = str(path).replace("\\", "/")
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    return normalized
 
 
 @dataclass(slots=True)

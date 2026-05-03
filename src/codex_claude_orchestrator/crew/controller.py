@@ -77,7 +77,6 @@ class CrewController:
         )
         role_set = set(worker_roles)
         tasks = [task for task in self._task_graph.default_graph(crew.crew_id, goal) if task.role_required in role_set]
-        active_worker_ids: list[str] = []
         try:
             for task in tasks:
                 worker = self._worker_pool.start_worker(
@@ -86,20 +85,17 @@ class CrewController:
                     task=task,
                     allow_dirty_base=allow_dirty_base,
                 )
-                active_worker_ids.append(worker.worker_id)
                 self._task_graph.assign(tasks, task.task_id, worker.worker_id)
         except Exception as exc:
             self._worker_pool.stop_crew(repo_root=repo_root, crew_id=crew.crew_id)
-            self._recorder.update_crew(crew.crew_id, {"active_worker_ids": []})
             self._recorder.finalize_crew(crew.crew_id, CrewStatus.FAILED, f"crew start failed: {exc}")
             raise
 
         self._recorder.write_tasks(crew.crew_id, tasks)
         crew.status = CrewStatus.RUNNING
-        crew.active_worker_ids = active_worker_ids
         self._recorder.update_crew(
             crew.crew_id,
-            {"status": CrewStatus.RUNNING.value, "active_worker_ids": active_worker_ids},
+            {"status": CrewStatus.RUNNING.value},
         )
         return crew
 
@@ -134,7 +130,7 @@ class CrewController:
         crew.status = CrewStatus.RUNNING
         self._recorder.update_crew(
             crew.crew_id,
-            {"status": CrewStatus.RUNNING.value, "active_worker_ids": []},
+            {"status": CrewStatus.RUNNING.value},
         )
         self.write_team_snapshot(crew_id=crew.crew_id, last_decision={"action_type": "start_dynamic"})
         return crew

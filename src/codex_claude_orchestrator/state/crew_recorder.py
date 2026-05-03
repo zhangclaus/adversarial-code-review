@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,53 @@ class CrewRecorder:
             w["worker_id"] for w in workers
             if not is_terminal_worker_status(w.get("status", "running"))
         ]
+
+    def recover_stale_busy_workers(
+        self, crew_id: str, max_busy_seconds: int = 300
+    ) -> list[str]:
+        """Reset BUSY workers that exceed the timeout back to IDLE.
+
+        Returns list of recovered worker IDs.  Called by prune_orphans
+        so that a crashed claim/release pair does not permanently block
+        a worker.
+        """
+        from codex_claude_orchestrator.crew.models import CrewEvent
+
+        path = self._crew_dir(crew_id) / "workers.jsonl"
+        workers = self._read_jsonl(path)
+        now = datetime.now(UTC)
+        threshold = now - timedelta(seconds=max_busy_seconds)
+        recovered: list[str] = []
+
+        for worker in workers:
+            if worker.get("status") != "busy":
+                continue
+            updated_str = worker.get("updated_at", "")
+            if not updated_str:
+                continue
+            try:
+                updated_at = datetime.fromisoformat(updated_str)
+            except ValueError:
+                continue
+            if updated_at < threshold:
+                worker["status"] = "idle"
+                worker["updated_at"] = utc_now()
+                recovered.append(worker["worker_id"])
+
+        if recovered:
+            self._write_jsonl(path, workers)
+            for worker_id in recovered:
+                self.append_event(crew_id, CrewEvent(
+                    event_id=f"recovery-{worker_id}",
+                    crew_id=crew_id,
+                    worker_id=worker_id,
+                    contract_id=None,
+                    type="worker_recovered",
+                    status="completed",
+                    reason=f"BUSY timeout exceeded ({max_busy_seconds}s), reset to IDLE",
+                ))
+
+        return recovered
 
     def write_tasks(self, crew_id: str, tasks: list[CrewTaskRecord]) -> None:
         self._write_json(self._crew_dir(crew_id) / "tasks.json", [task.to_dict() for task in tasks])

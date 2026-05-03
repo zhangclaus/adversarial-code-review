@@ -7,7 +7,7 @@ from typing import Any
 
 from codex_claude_orchestrator.crew.decision_policy import CrewDecisionPolicy
 from codex_claude_orchestrator.crew.gates import WriteScopeGate
-from codex_claude_orchestrator.crew.models import DecisionActionType, WorkerRole
+from codex_claude_orchestrator.crew.models import DecisionActionType, WorkerRole, is_terminal_worker_status
 from codex_claude_orchestrator.crew.scope import scope_covers_all as _scope_covers_all
 from codex_claude_orchestrator.crew.review_verdict import ReviewVerdict, ReviewVerdictParser
 from codex_claude_orchestrator.v4.event_store_protocol import EventStore
@@ -153,18 +153,23 @@ class V4CrewRunner:
             self._register_worker(crew_id=crew_id, worker=source_worker)
             round_id = f"round-{round_index}"
             marker = self._turn_marker(crew_id, source_worker["worker_id"], "source", round_index)
-            turn_result = self._supervisor.run_source_turn(
-                crew_id=crew_id,
-                goal=goal,
-                worker_id=source_worker["worker_id"],
-                round_id=round_id,
-                message=self._source_message(
-                    round_index=round_index,
-                    failures=verification_failures,
-                    repair_requests=repair_requests,
-                ),
-                expected_marker=marker,
-            )
+            source_worker_id = source_worker["worker_id"]
+            self._controller.claim_worker(crew_id, source_worker_id)
+            try:
+                turn_result = self._supervisor.run_source_turn(
+                    crew_id=crew_id,
+                    goal=goal,
+                    worker_id=source_worker_id,
+                    round_id=round_id,
+                    message=self._source_message(
+                        round_index=round_index,
+                        failures=verification_failures,
+                        repair_requests=repair_requests,
+                    ),
+                    expected_marker=marker,
+                )
+            finally:
+                self._controller.release_worker(crew_id, source_worker_id)
             events.append(
                 {
                     "action": "v4_source_turn",
@@ -450,21 +455,26 @@ class V4CrewRunner:
 
         self._register_worker(crew_id=crew_id, worker=review_worker)
         marker = self._turn_marker(crew_id, review_worker["worker_id"], "review", round_index)
-        turn_result = self._supervisor.run_worker_turn(
-            crew_id=crew_id,
-            goal=goal,
-            worker_id=review_worker["worker_id"],
-            round_id=round_id,
-            phase="review",
-            contract_id=review_worker.get("contract_id") or "patch_auditor",
-            message=self._review_message(
+        review_worker_id = review_worker["worker_id"]
+        self._controller.claim_worker(crew_id, review_worker_id)
+        try:
+            turn_result = self._supervisor.run_worker_turn(
+                crew_id=crew_id,
                 goal=goal,
-                source_worker=source_worker,
-                changes=changes,
-                repo_report=repo_report,
-            ),
-            expected_marker=marker,
-        )
+                worker_id=review_worker_id,
+                round_id=round_id,
+                phase="review",
+                contract_id=review_worker.get("contract_id") or "patch_auditor",
+                message=self._review_message(
+                    goal=goal,
+                    source_worker=source_worker,
+                    changes=changes,
+                    repo_report=repo_report,
+                ),
+                expected_marker=marker,
+            )
+        finally:
+            self._controller.release_worker(crew_id, review_worker_id)
         events.append(
             {
                 "action": "v4_review_turn",
@@ -581,7 +591,7 @@ class V4CrewRunner:
     ) -> bool:
         if worker.get("role") != WorkerRole.IMPLEMENTER.value:
             return False
-        if worker.get("status", "running") in {"failed", "stopped"}:
+        if is_terminal_worker_status(worker.get("status", "running")):
             return False
         worker_scope = worker.get("write_scope") or []
         if not worker_scope:

@@ -188,13 +188,9 @@ class WorkerPool:
 
     def find_compatible_worker(self, crew_id: str, contract: WorkerContract) -> dict | None:
         details = self._recorder.read_crew(crew_id)
-        active_worker_ids = set(self._recorder.active_worker_ids(crew_id))
         required = set(contract.required_capabilities)
         for worker in details["workers"]:
-            if worker["worker_id"] not in active_worker_ids:
-                continue
-            status = worker.get("status", "running")
-            if status not in {"running", "idle"}:
+            if worker.get("status", "running") not in {"running", "idle"}:
                 continue
             if not required.issubset(set(worker.get("capabilities", []))):
                 continue
@@ -355,7 +351,15 @@ class WorkerPool:
         ))
 
     def prune_orphans(self, *, repo_root: Path) -> dict:
-        return self._native_session.prune_orphans(active_sessions=self._active_terminal_sessions())
+        result = self._native_session.prune_orphans(active_sessions=self._active_terminal_sessions())
+        # Recover stale BUSY workers from crashed claim/release pairs.
+        recovered: list[str] = []
+        for crew in self._recorder.list_crews():
+            if crew["status"] == CrewStatus.RUNNING.value:
+                recovered.extend(self._recorder.recover_stale_busy_workers(crew["crew_id"]))
+        if recovered:
+            result["recovered_workers"] = recovered
+        return result
 
     def _allocation_for_task(
         self,
