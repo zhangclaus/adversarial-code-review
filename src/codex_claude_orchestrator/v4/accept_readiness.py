@@ -92,13 +92,10 @@ class AcceptReadinessGate:
                 review_event_id=review_event.event_id,
             )
 
-        blocking_challenge_event_ids = [
-            event.event_id
-            for event in through_ready
-            if event.type == "challenge.issued"
-            and event.sequence > review_event.sequence
-            and _is_blocking_challenge(event)
-        ]
+        blocking_challenge_event_ids = self._open_blocking_challenge_event_ids(
+            through_ready,
+            after_sequence=review_event.sequence,
+        )
         if blocking_challenge_event_ids:
             return AcceptReadinessDecision(
                 allowed=False,
@@ -151,13 +148,40 @@ class AcceptReadinessGate:
                 return event
         return None
 
+    def _open_blocking_challenge_event_ids(
+        self,
+        events: list[AgentEvent],
+        *,
+        after_sequence: int,
+    ) -> list[str]:
+        open_challenges: dict[str, str] = {}
+        for event in events:
+            if event.sequence <= after_sequence:
+                continue
+            if event.type == "challenge.issued" and _is_blocking_challenge(event):
+                open_challenges[_challenge_key(event)] = event.event_id
+                continue
+            if event.type != "repair.completed":
+                continue
+            if event.payload.get("outcome") != "fixed":
+                continue
+            challenge_id = str(event.payload.get("challenge_id", ""))
+            if challenge_id:
+                open_challenges.pop(challenge_id, None)
+        return list(open_challenges.values())
+
 
 def _event_round_id(event: AgentEvent) -> str:
     round_id = event.round_id or event.payload.get("round_id", "")
     return str(round_id) if round_id else ""
 
 
+def _challenge_key(event: AgentEvent) -> str:
+    return str(event.payload.get("challenge_id", "")) or event.event_id
+
+
 def _is_blocking_challenge(event: AgentEvent) -> bool:
+    # Accept is fail-closed: a challenge without severity is treated as blocking.
     return str(event.payload.get("severity") or "block") == "block"
 
 

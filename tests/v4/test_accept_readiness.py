@@ -91,6 +91,51 @@ def test_accept_readiness_ignores_non_blocking_challenge_before_ready(tmp_path):
     assert decision.blocking_challenge_event_ids == []
 
 
+def test_accept_readiness_allows_repaired_blocking_challenge_before_ready(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _review_completed(store, status="ok")
+    _challenge(store, challenge_id="challenge-1", severity="block")
+    _repair_completed(store, challenge_id="challenge-1", outcome="fixed")
+    _verification_passed(store)
+    _ready(store)
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is True
+    assert decision.reason == "ready"
+    assert decision.blocking_challenge_event_ids == []
+
+
+def test_accept_readiness_blocks_unfixed_challenge_before_ready(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _review_completed(store, status="ok")
+    challenge = _challenge(store, challenge_id="challenge-1", severity="block")
+    _repair_completed(store, challenge_id="challenge-1", outcome="not_fixed")
+    _verification_passed(store)
+    _ready(store)
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is False
+    assert decision.reason == "blocking_challenge_open"
+    assert decision.blocking_challenge_event_ids == [challenge.event_id]
+
+
+def test_accept_readiness_blocks_post_ready_challenge_even_when_later_repaired(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    _review_completed(store, status="ok")
+    _verification_passed(store)
+    _ready(store)
+    challenge = _challenge(store, challenge_id="challenge-1", severity="block")
+    _repair_completed(store, challenge_id="challenge-1", outcome="fixed")
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is False
+    assert decision.reason == "ready_invalidated_after_ready"
+    assert decision.invalidating_event_ids == [challenge.event_id]
+
+
 @pytest.mark.parametrize(
     "event_type",
     [
@@ -244,8 +289,14 @@ def _verification_passed(store, *, round_id="round-1"):
     )
 
 
-def _challenge(store, *, round_id="round-1", severity="block"):
-    payload = {"finding": "review block"}
+def _challenge(
+    store,
+    *,
+    round_id="round-1",
+    challenge_id="challenge-1",
+    severity="block",
+):
+    payload = {"challenge_id": challenge_id, "finding": "review block"}
     if severity is not None:
         payload["severity"] = severity
     return store.append(
@@ -255,4 +306,21 @@ def _challenge(store, *, round_id="round-1", severity="block"):
         worker_id="worker-source",
         round_id=round_id,
         payload=payload,
+    )
+
+
+def _repair_completed(
+    store,
+    *,
+    round_id="round-1",
+    challenge_id="challenge-1",
+    outcome="fixed",
+):
+    return store.append(
+        stream_id="crew-1",
+        type="repair.completed",
+        crew_id="crew-1",
+        worker_id="worker-source",
+        round_id=round_id,
+        payload={"challenge_id": challenge_id, "outcome": outcome},
     )
