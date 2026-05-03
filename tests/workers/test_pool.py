@@ -280,18 +280,19 @@ def test_worker_pool_can_stop_workers_and_prune_orphan_tmux_sessions(tmp_path: P
 
     stopped_worker = pool.stop_worker(repo_root=repo_root, crew_id=crew.crew_id, worker_id="worker-explorer")
     after_worker_stop = recorder.read_crew(crew.crew_id)
+    active_after_single_stop = recorder.active_worker_ids(crew.crew_id)
     stopped_crew = pool.stop_crew(repo_root=repo_root, crew_id=crew.crew_id)
     after_crew_stop = recorder.read_crew(crew.crew_id)
     pruned = pool.prune_orphans(repo_root=repo_root)
 
     assert stopped_worker["stopped"] is True
-    assert after_worker_stop["crew"]["active_worker_ids"] == ["worker-reviewer"]
+    assert active_after_single_stop == ["worker-reviewer"]
     assert next(worker for worker in after_worker_stop["workers"] if worker["worker_id"] == "worker-explorer")["status"] == "stopped"
     assert [item["terminal_session"] for item in stopped_crew["stopped_workers"]] == [
         "crew-1-worker-explorer",
         "crew-1-worker-reviewer",
     ]
-    assert after_crew_stop["crew"]["active_worker_ids"] == []
+    assert recorder.active_worker_ids(crew.crew_id) == []
     assert {worker["status"] for worker in after_crew_stop["workers"]} == {"stopped"}
     assert pruned["active_sessions"] == []
     assert pruned["pruned_sessions"] == ["crew-worker-old"]

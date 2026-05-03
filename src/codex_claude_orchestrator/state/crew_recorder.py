@@ -114,6 +114,19 @@ class CrewRecorder:
                 return True
         return False
 
+    def active_worker_ids(self, crew_id: str) -> list[str]:
+        """Derive active worker IDs from worker records.
+
+        A worker is active if its status is not terminal (FAILED or STOPPED).
+        """
+        from codex_claude_orchestrator.crew.models import is_terminal_worker_status
+        path = self._crew_dir(crew_id) / "workers.jsonl"
+        workers = self._read_jsonl(path)
+        return [
+            w["worker_id"] for w in workers
+            if not is_terminal_worker_status(w.get("status", "running"))
+        ]
+
     def write_tasks(self, crew_id: str, tasks: list[CrewTaskRecord]) -> None:
         self._write_json(self._crew_dir(crew_id) / "tasks.json", [task.to_dict() for task in tasks])
 

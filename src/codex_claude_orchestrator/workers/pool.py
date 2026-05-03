@@ -171,7 +171,6 @@ class WorkerPool:
             assigned_task_ids=[task.task_id],
         )
         self._recorder.append_worker(crew.crew_id, worker)
-        self._add_active_worker_id(crew.crew_id, worker_id)
         self._blackboard.append(
             BlackboardEntry(
                 entry_id=self._entry_id_factory(),
@@ -189,7 +188,7 @@ class WorkerPool:
 
     def find_compatible_worker(self, crew_id: str, contract: WorkerContract) -> dict | None:
         details = self._recorder.read_crew(crew_id)
-        active_worker_ids = set(details["crew"].get("active_worker_ids") or [])
+        active_worker_ids = set(self._recorder.active_worker_ids(crew_id))
         required = set(contract.required_capabilities)
         for worker in details["workers"]:
             if worker["worker_id"] not in active_worker_ids:
@@ -309,7 +308,6 @@ class WorkerPool:
             cleanup_result = self._worktree_manager.cleanup(repo_root=repo_root, allocation=allocation, remove=True)
         result = self._native_session.stop(terminal_session=worker["terminal_session"])
         self._mark_worker_stopped(crew_id, worker_id)
-        self._remove_active_worker_ids(crew_id, [worker_id])
         return {"worker_id": worker_id, **result, "workspace_cleanup": cleanup_result}
 
     def stop_crew(self, *, repo_root: Path, crew_id: str) -> dict:
@@ -318,7 +316,6 @@ class WorkerPool:
             result = self._native_session.stop(terminal_session=worker["terminal_session"])
             self._mark_worker_stopped(crew_id, worker["worker_id"])
             stopped_workers.append({"worker_id": worker["worker_id"], **result})
-        self._recorder.update_crew(crew_id, {"active_worker_ids": []})
         return {"crew_id": crew_id, "stopped_workers": stopped_workers}
 
     def claim_worker(self, crew_id: str, worker_id: str) -> None:
@@ -423,26 +420,13 @@ class WorkerPool:
     def _mark_worker_stopped(self, crew_id: str, worker_id: str) -> None:
         self._recorder.update_worker(crew_id, worker_id, {"status": WorkerStatus.STOPPED.value})
 
-    def _remove_active_worker_ids(self, crew_id: str, worker_ids: list[str]) -> None:
-        details = self._recorder.read_crew(crew_id)
-        removed = set(worker_ids)
-        active_worker_ids = [worker_id for worker_id in details["crew"].get("active_worker_ids", []) if worker_id not in removed]
-        self._recorder.update_crew(crew_id, {"active_worker_ids": active_worker_ids})
-
-    def _add_active_worker_id(self, crew_id: str, worker_id: str) -> None:
-        details = self._recorder.read_crew(crew_id)
-        active_worker_ids = list(details["crew"].get("active_worker_ids") or [])
-        if worker_id not in active_worker_ids:
-            active_worker_ids.append(worker_id)
-            self._recorder.update_crew(crew_id, {"active_worker_ids": active_worker_ids})
-
     def _active_terminal_sessions(self) -> set[str]:
         active = set()
         for crew in self._recorder.list_crews():
             if crew["status"] != CrewStatus.RUNNING.value:
                 continue
             details = self._recorder.read_crew(crew["crew_id"])
-            active_worker_ids = set(details["crew"].get("active_worker_ids") or [])
+            active_worker_ids = set(self._recorder.active_worker_ids(crew["crew_id"]))
             active.update(
                 worker["terminal_session"]
                 for worker in details["workers"]

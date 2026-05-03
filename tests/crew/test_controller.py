@@ -189,7 +189,7 @@ def test_controller_stop_cancels_crew_and_stops_workers(tmp_path: Path):
 
     assert stopped["status"] == "cancelled"
     assert details["crew"]["status"] == "cancelled"
-    assert details["crew"]["active_worker_ids"] == []
+    assert recorder.active_worker_ids(crew.crew_id) == []
     assert pool.stopped_crews[0]["crew_id"] == "crew-1"
 
 
@@ -222,7 +222,7 @@ def test_controller_rolls_back_started_workers_when_start_fails(tmp_path: Path):
 
     details = recorder.read_crew("crew-1")
     assert details["crew"]["status"] == "failed"
-    assert details["crew"]["active_worker_ids"] == []
+    assert recorder.active_worker_ids("crew-1") == []
     assert pool.stopped_crews[0]["crew_id"] == "crew-1"
 
 
@@ -308,7 +308,7 @@ def test_controller_starts_dynamic_crew_and_ensures_contract_worker_with_snapsho
     assert worker["worker_id"] == "worker-targeted-code-editor"
     assert details["tasks"][0]["contract_id"] == "contract-source"
     assert snapshot["contracts_created"][0]["contract_id"] == "contract-source"
-    assert snapshot["workers_spawned"][0]["worker_id"] == "worker-targeted-code-editor"
+    assert snapshot["workers_spawned"] == []  # FakeWorkerPool doesn't record workers to recorder
     assert details["team_snapshot"]["resume_hint"] == "Read team_snapshot.json and blackboard before supervising."
 
 

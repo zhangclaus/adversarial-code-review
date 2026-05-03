@@ -164,10 +164,6 @@ class CrewController:
         tasks = [existing for existing in tasks if existing.task_id != task.task_id]
         tasks.append(task)
         self._recorder.write_tasks(crew_id, tasks)
-        active_worker_ids = list(self._recorder.read_crew(crew_id)["crew"].get("active_worker_ids") or [])
-        if worker_payload["worker_id"] not in active_worker_ids:
-            active_worker_ids.append(worker_payload["worker_id"])
-            self._recorder.update_crew(crew_id, {"active_worker_ids": active_worker_ids})
         self.write_team_snapshot(
             crew_id=crew_id,
             last_decision={"action_type": "spawn_worker", "contract_id": contract.contract_id},
@@ -188,7 +184,7 @@ class CrewController:
         ]
         workers = details.get("workers") or [
             {"worker_id": worker_id}
-            for worker_id in details["crew"].get("active_worker_ids", [])
+            for worker_id in self._recorder.active_worker_ids(crew_id)
         ]
         payload = {
             "crew_id": crew_id,
@@ -400,13 +396,11 @@ class CrewController:
 
     def stop(self, *, repo_root: Path, crew_id: str) -> dict:
         stop_result = self._worker_pool.stop_crew(repo_root=repo_root, crew_id=crew_id)
-        self._recorder.update_crew(crew_id, {"active_worker_ids": []})
         self._recorder.finalize_crew(crew_id, CrewStatus.CANCELLED, "crew stopped by Codex")
         return {"crew_id": crew_id, "status": CrewStatus.CANCELLED.value, "stop": stop_result}
 
     def stop_workers_for_accept(self, *, repo_root: Path, crew_id: str) -> dict:
         stop_result = self._worker_pool.stop_crew(repo_root=repo_root, crew_id=crew_id)
-        self._recorder.update_crew(crew_id, {"active_worker_ids": []})
         return stop_result
 
     def prune_orphans(self, *, repo_root: Path) -> dict:

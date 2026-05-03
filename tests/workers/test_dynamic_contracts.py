@@ -81,7 +81,7 @@ def test_worker_pool_ensure_worker_spawns_contract_worker_and_records_artifacts(
     assert worker.capabilities == ["inspect_code", "edit_source", "edit_tests", "run_verification"]
     assert worker.authority_level == AuthorityLevel.SOURCE_WRITE
     assert worker.workspace_mode == WorkspaceMode.WORKTREE
-    assert details["crew"]["active_worker_ids"] == ["worker-source"]
+    assert recorder.active_worker_ids("crew-1") == ["worker-source"]
     assert details["worker_contracts"][0]["contract_id"] == "contract-source"
     assert "contracts/contract-source.json" in details["artifacts"]
     assert "workers/worker-source/onboarding_prompt.md" in details["artifacts"]
