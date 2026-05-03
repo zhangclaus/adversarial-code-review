@@ -327,7 +327,11 @@ class WorkerPool:
         current = worker.get("status", "running")
         if current not in {"running", "idle"}:
             raise ValueError(f"Cannot claim worker {worker_id} in status {current}")
-        self._recorder.update_worker(crew_id, worker_id, {"status": "busy"})
+        transitioned = self._recorder.transition_worker_status(
+            crew_id, worker_id, expected_status=current, new_status="busy",
+        )
+        if not transitioned:
+            raise ValueError(f"Claim race: worker {worker_id} changed status concurrently")
         self._recorder.append_event(crew_id, CrewEvent(
             event_id=self._event_id_factory(),
             crew_id=crew_id,
@@ -339,10 +343,11 @@ class WorkerPool:
 
     def release_worker(self, crew_id: str, worker_id: str) -> None:
         """Transition worker from BUSY to IDLE (idempotent)."""
-        worker = self._find_worker(crew_id, worker_id)
-        if worker.get("status") != "busy":
+        transitioned = self._recorder.transition_worker_status(
+            crew_id, worker_id, expected_status="busy", new_status="idle",
+        )
+        if not transitioned:
             return  # idempotent
-        self._recorder.update_worker(crew_id, worker_id, {"status": "idle"})
         self._recorder.append_event(crew_id, CrewEvent(
             event_id=self._event_id_factory(),
             crew_id=crew_id,
