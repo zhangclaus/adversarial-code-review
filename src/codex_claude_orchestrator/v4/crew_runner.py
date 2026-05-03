@@ -8,9 +8,16 @@ from typing import Any
 from codex_claude_orchestrator.crew.decision_policy import CrewDecisionPolicy
 from codex_claude_orchestrator.crew.gates import WriteScopeGate
 from codex_claude_orchestrator.crew.models import DecisionActionType, WorkerRole
+from codex_claude_orchestrator.crew.scope import scope_covers_all as _scope_covers_all
 from codex_claude_orchestrator.crew.review_verdict import ReviewVerdict, ReviewVerdictParser
 from codex_claude_orchestrator.v4.event_store_protocol import EventStore
 from codex_claude_orchestrator.v4.events import AgentEvent
+from codex_claude_orchestrator.v4.learning_feedback import GovernedLearningFeedback
+from codex_claude_orchestrator.v4.learning_projection import LearningProjection
+from codex_claude_orchestrator.v4.merge_inputs import V4MergeInputRecorder
+from codex_claude_orchestrator.v4.paths import V4Paths
+from codex_claude_orchestrator.v4.planner import PlannerPolicy
+from codex_claude_orchestrator.v4.repo_intelligence import RepoIntelligence
 from codex_claude_orchestrator.v4.runtime import WorkerSpec
 from codex_claude_orchestrator.v4.workflow import V4WorkflowEngine
 from codex_claude_orchestrator.workers.selection import WorkerSelectionPolicy
@@ -24,6 +31,8 @@ class V4CrewRunner:
         supervisor,
         event_store: EventStore,
         decision_policy: CrewDecisionPolicy | None = None,
+        planner_policy: PlannerPolicy | None = None,
+        repo_intelligence: RepoIntelligence | None = None,
         scope_gate: WriteScopeGate | None = None,
         review_parser: ReviewVerdictParser | None = None,
     ) -> None:
@@ -32,6 +41,8 @@ class V4CrewRunner:
         self._events = event_store
         self._workflow = V4WorkflowEngine(event_store=event_store)
         self._decision_policy = decision_policy or CrewDecisionPolicy()
+        self._planner_policy = planner_policy or PlannerPolicy()
+        self._repo_intelligence = repo_intelligence or RepoIntelligence()
         self._scope_gate = scope_gate or WriteScopeGate()
         self._review_parser = review_parser or ReviewVerdictParser()
 
@@ -95,17 +106,35 @@ class V4CrewRunner:
         events: list[dict[str, Any]] = []
         verification_failures: list[dict[str, Any]] = []
         repair_requests: list[str] = []
+        paths = V4Paths(repo_root=repo_root, crew_id=crew_id)
+        learning_feedback = GovernedLearningFeedback(
+            event_store=self._events,
+            paths=paths,
+        )
+        merge_input_recorder = V4MergeInputRecorder(
+            event_store=self._events,
+            paths=paths,
+        )
 
         for round_index in range(1, max_rounds + 1):
             details = self._controller.status(repo_root=repo_root, crew_id=crew_id)
             goal = details.get("crew", {}).get("root_goal", "")
-            source_worker = self._source_worker(details)
+            repo_report = self._repo_intelligence.analyze(repo_root=repo_root, goal=goal)
+            learning_projection = LearningProjection.from_events(self._events.list_stream(crew_id))
+            source_worker = self._source_worker(
+                details,
+                requested_write_scope=repo_report.write_scope,
+                worker_quality_scores=learning_projection.worker_quality_scores,
+            )
             if source_worker is None and dynamic:
                 source_worker = self._spawn_source_worker(
                     repo_root=repo_root,
                     crew_id=crew_id,
                     goal=goal,
                     details=details,
+                    requested_write_scope=repo_report.write_scope,
+                    repo_report=repo_report.to_dict(),
+                    learning_projection=learning_projection,
                     verification_failures=verification_failures,
                     repair_requests=repair_requests,
                     allow_dirty_base=allow_dirty_base,
@@ -155,15 +184,29 @@ class V4CrewRunner:
 
             changes = self._controller.changes(crew_id=crew_id, worker_id=source_worker["worker_id"])
             events.append({"action": "record_changes", "round": round_index, "changes": changes})
+            merge_input = None
+            if changes.get("changed_files"):
+                merge_input = merge_input_recorder.record_from_changes(
+                    changes=changes,
+                    turn_id=turn_result["turn_id"],
+                    round_id=round_id,
+                    contract_id=source_worker.get("contract_id", ""),
+                )
+                events.append(
+                    {
+                        "action": "record_v4_merge_input",
+                        "round": round_index,
+                        "worker_id": source_worker["worker_id"],
+                        "result_artifact": merge_input["result_artifact"],
+                        "patch_artifact": merge_input["patch_artifact"],
+                    }
+                )
+            merge_evidence_refs = _merge_input_evidence_refs(merge_input)
 
             scope_result = self._scope_gate.evaluate(
                 changed_files=changes.get("changed_files", []),
                 write_scope=self._write_scope_for_worker(details, source_worker),
-                evidence_refs=[
-                    ref
-                    for ref in (changes.get("artifact"), changes.get("diff_artifact"))
-                    if ref
-                ],
+                evidence_refs=merge_evidence_refs or _legacy_change_evidence_refs(changes),
             )
             events.append(
                 {
@@ -196,13 +239,19 @@ class V4CrewRunner:
                     summary=summary,
                     category="write_scope",
                     source_event_ids=[],
-                    artifact_refs=scope_result.evidence_refs,
+                    artifact_refs=scope_result.evidence_refs or merge_evidence_refs,
+                    learning_feedback=learning_feedback,
                 )
                 repair_requests.append(summary)
                 events.append({"action": "challenge", "round": round_index, "summary": summary})
                 continue
 
             if changes.get("changed_files"):
+                change_report = self._repo_intelligence.analyze(
+                    repo_root=repo_root,
+                    goal=goal,
+                    changed_files=changes.get("changed_files", []),
+                )
                 review_result = self._run_review(
                     repo_root=repo_root,
                     crew_id=crew_id,
@@ -212,6 +261,8 @@ class V4CrewRunner:
                     details=details,
                     source_worker=source_worker,
                     changes=changes,
+                    repo_report=change_report.to_dict(),
+                    learning_projection=learning_projection,
                     allow_dirty_base=allow_dirty_base,
                 )
                 events.extend(review_result["events"])
@@ -245,6 +296,7 @@ class V4CrewRunner:
                         category="review_block",
                         source_event_ids=review_result.get("source_event_ids", []),
                         artifact_refs=review_verdict.evidence_refs,
+                        learning_feedback=learning_feedback,
                     )
                     repair_requests.append(summary)
                     events.append({"action": "challenge", "round": round_index, "summary": summary})
@@ -269,11 +321,7 @@ class V4CrewRunner:
             events.append({"action": "verify", "round": round_index, "results": verification_results})
             failed = [result for result in verification_results if not result.get("passed", False)]
             if not failed:
-                evidence_refs = [
-                    ref
-                    for ref in (changes.get("artifact"), changes.get("diff_artifact"))
-                    if ref
-                ]
+                evidence_refs = merge_evidence_refs or _legacy_change_evidence_refs(changes)
                 self._workflow.mark_ready(
                     crew_id=crew_id,
                     round_id=round_id,
@@ -301,6 +349,7 @@ class V4CrewRunner:
                 category="verification_failed",
                 source_event_ids=[event.event_id for event in verification_events],
                 artifact_refs=[ref for event in verification_events for ref in event.artifact_refs],
+                learning_feedback=learning_feedback,
             )
             repair_requests.append(summary)
             events.append({"action": "challenge", "round": round_index, "summary": summary})
@@ -320,22 +369,33 @@ class V4CrewRunner:
         crew_id: str,
         goal: str,
         details: dict[str, Any],
+        requested_write_scope: list[str],
+        repo_report: dict[str, Any],
+        learning_projection: LearningProjection,
         verification_failures: list[dict[str, Any]],
         repair_requests: list[str],
         allow_dirty_base: bool,
         seed_contract: str | None,
     ) -> dict[str, Any]:
+        compatible_workers = [
+            w for w in details.get("workers", [])
+            if not self._is_incompatible_source_worker(w, requested_write_scope)
+        ]
         action = self._decision_policy.decide(
             {
                 "crew_id": crew_id,
                 "goal": goal,
-                "workers": details.get("workers", []),
+                "workers": compatible_workers,
                 "verification_failures": verification_failures,
                 "repair_requests": repair_requests,
                 "changed_files": [],
                 "seed_contract": seed_contract,
                 "context_insufficient": False,
-                "repo_write_scope": self._repo_write_scope(repo_root),
+                "repo_write_scope": repo_report.get("write_scope") or self._repo_write_scope(repo_root),
+                "repo_risk_tags": repo_report.get("risk_tags", []),
+                "worker_quality_scores": learning_projection.worker_quality_scores,
+                "active_skill_refs": learning_projection.active_skill_refs,
+                "active_guardrail_refs": learning_projection.active_guardrail_refs,
             }
         )
         if action.action_type is not DecisionActionType.SPAWN_WORKER or action.contract is None:
@@ -360,9 +420,14 @@ class V4CrewRunner:
         details: dict[str, Any],
         source_worker: dict[str, Any],
         changes: dict[str, Any],
+        repo_report: dict[str, Any],
+        learning_projection: LearningProjection,
         allow_dirty_base: bool,
     ) -> dict[str, Any]:
-        review_worker = self._review_worker(details)
+        review_worker = self._review_worker(
+            details,
+            worker_quality_scores=learning_projection.worker_quality_scores,
+        )
         events: list[dict[str, Any]] = []
         if review_worker is None:
             review_worker = self._spawn_review_worker(
@@ -371,6 +436,8 @@ class V4CrewRunner:
                 goal=goal,
                 details=details,
                 changes=changes,
+                repo_report=repo_report,
+                learning_projection=learning_projection,
                 allow_dirty_base=allow_dirty_base,
             )
             events.append(
@@ -390,7 +457,12 @@ class V4CrewRunner:
             round_id=round_id,
             phase="review",
             contract_id=review_worker.get("contract_id") or "patch_auditor",
-            message=self._review_message(goal=goal, source_worker=source_worker, changes=changes),
+            message=self._review_message(
+                goal=goal,
+                source_worker=source_worker,
+                changes=changes,
+                repo_report=repo_report,
+            ),
             expected_marker=marker,
         )
         events.append(
@@ -458,6 +530,8 @@ class V4CrewRunner:
         goal: str,
         details: dict[str, Any],
         changes: dict[str, Any],
+        repo_report: dict[str, Any],
+        learning_projection: LearningProjection,
         allow_dirty_base: bool,
     ) -> dict[str, Any]:
         action = self._decision_policy.decide(
@@ -468,7 +542,11 @@ class V4CrewRunner:
                 "verification_failures": [],
                 "changed_files": changes.get("changed_files", []),
                 "review_status": None,
-                "repo_write_scope": self._repo_write_scope(repo_root),
+                "repo_write_scope": repo_report.get("write_scope") or self._repo_write_scope(repo_root),
+                "repo_risk_tags": repo_report.get("risk_tags", []),
+                "worker_quality_scores": learning_projection.worker_quality_scores,
+                "active_skill_refs": learning_projection.active_skill_refs,
+                "active_guardrail_refs": learning_projection.active_guardrail_refs,
             }
         )
         if action.action_type is not DecisionActionType.SPAWN_WORKER or action.contract is None:
@@ -482,28 +560,52 @@ class V4CrewRunner:
             allow_dirty_base=allow_dirty_base,
         )
 
-    def _source_worker(self, details: dict[str, Any]) -> dict[str, Any] | None:
-        workers = [
-            worker
-            for worker in details.get("workers", [])
-            if worker.get("status", "running") not in {"failed", "stopped"}
-        ]
-        return next(
-            (worker for worker in workers if worker.get("authority_level") == "source_write"),
-            next((worker for worker in workers if worker.get("role") == WorkerRole.IMPLEMENTER.value), None),
+    def _source_worker(
+        self,
+        details: dict[str, Any],
+        *,
+        requested_write_scope: list[str],
+        worker_quality_scores: dict[str, int],
+    ) -> dict[str, Any] | None:
+        selected = self._planner_policy.select_worker(
+            workers=details.get("workers", []),
+            required_authority="source_write",
+            required_capabilities=["edit_source"],
+            requested_write_scope=requested_write_scope,
+            worker_quality_scores=worker_quality_scores,
         )
+        return selected
 
-    def _review_worker(self, details: dict[str, Any]) -> dict[str, Any] | None:
-        workers = [
-            worker
-            for worker in details.get("workers", [])
-            if worker.get("status", "running") not in {"failed", "stopped"}
-            and "review_patch" in worker.get("capabilities", [])
-        ]
-        return next(
-            (worker for worker in workers if worker.get("label") == "patch-risk-auditor"),
-            workers[0] if workers else None,
+    def _is_incompatible_source_worker(
+        self, worker: dict[str, Any], requested_write_scope: list[str]
+    ) -> bool:
+        if worker.get("role") != WorkerRole.IMPLEMENTER.value:
+            return False
+        if worker.get("status", "running") in {"failed", "stopped"}:
+            return False
+        worker_scope = worker.get("write_scope") or []
+        if not worker_scope:
+            return False
+        if not requested_write_scope:
+            return False
+        return not _scope_covers_all(worker_scope, requested_write_scope)
+
+    def _review_worker(
+        self,
+        details: dict[str, Any],
+        *,
+        worker_quality_scores: dict[str, int],
+    ) -> dict[str, Any] | None:
+        selected = self._planner_policy.select_worker(
+            workers=details.get("workers", []),
+            required_authority="readonly",
+            required_capabilities=["review_patch"],
+            requested_write_scope=[],
+            worker_quality_scores=worker_quality_scores,
         )
+        if selected is not None:
+            return selected
+        return None
 
     def _register_worker(self, *, crew_id: str, worker: dict[str, Any]) -> None:
         register = getattr(self._supervisor, "register_worker", None)
@@ -644,6 +746,7 @@ class V4CrewRunner:
         category: str,
         source_event_ids: list[str],
         artifact_refs: list[str],
+        learning_feedback: GovernedLearningFeedback | None = None,
     ) -> None:
         challenge_event = self._events.append(
             stream_id=crew_id,
@@ -678,6 +781,8 @@ class V4CrewRunner:
             },
             artifact_refs=artifact_refs,
         )
+        if learning_feedback is not None:
+            learning_feedback.record_challenge(challenge_event)
 
     def _parse_review_verdict(self, *, crew_id: str, turn_id: str) -> tuple[ReviewVerdict, list[AgentEvent]]:
         source_events = [
@@ -688,6 +793,12 @@ class V4CrewRunner:
         latest = source_events[-1] if source_events else None
         if latest is None:
             return self._review_parser.parse(""), []
+        typed_review = latest.payload.get("review")
+        if isinstance(typed_review, dict) and typed_review:
+            return _typed_review_verdict(
+                typed_review,
+                fallback_evidence_refs=list(latest.artifact_refs),
+            ), source_events
         summary = str(latest.payload.get("summary", ""))
         return self._review_parser.parse(
             summary,
@@ -710,15 +821,24 @@ class V4CrewRunner:
         summary = "; ".join(result.get("summary", "verification failed") for result in failures[-3:])
         return f"Fix verification failure before the next Codex review:\n{summary}"
 
-    def _review_message(self, *, goal: str, source_worker: dict[str, Any], changes: dict[str, Any]) -> str:
+    def _review_message(
+        self,
+        *,
+        goal: str,
+        source_worker: dict[str, Any],
+        changes: dict[str, Any],
+        repo_report: dict[str, Any],
+    ) -> str:
         changed_files = ", ".join(changes.get("changed_files", [])) or "no changed files"
         diff_artifact = changes.get("diff_artifact", "")
+        risk_tags = ", ".join(repo_report.get("risk_tags", [])) or "none"
         return (
             "Review the source worker output against the requested spec, behavioral requirements, "
             "and code quality bar before verification.\n"
             f"Goal: {goal}\n"
             f"Source worker: {source_worker['worker_id']}\n"
             f"Changed files: {changed_files}\n"
+            f"Repo risk tags: {risk_tags}\n"
             f"Diff artifact: {diff_artifact}\n\n"
             "Write a valid V4 outbox for this review turn. Put this parseable block in the outbox summary:\n"
             "<<<CODEX_REVIEW\n"
@@ -754,6 +874,54 @@ def _artifact_refs_from_result(result: dict[str, Any]) -> list[str]:
         if isinstance(value, str) and value:
             refs.append(value)
     return list(dict.fromkeys(refs))
+
+
+def _typed_review_verdict(
+    review: dict[str, Any],
+    *,
+    fallback_evidence_refs: list[str],
+) -> ReviewVerdict:
+    status = str(review.get("status") or review.get("verdict") or "").strip().lower()
+    if status == "warning":
+        status = "warn"
+    if status == "blocked":
+        status = "block"
+    if status not in {"ok", "warn", "block"}:
+        status = "unknown"
+    evidence_refs = review.get("evidence_refs", fallback_evidence_refs)
+    if not isinstance(evidence_refs, list) or any(not isinstance(item, str) for item in evidence_refs):
+        evidence_refs = fallback_evidence_refs
+    findings = review.get("findings", [])
+    if not isinstance(findings, list) or any(not isinstance(item, str) for item in findings):
+        findings = []
+    return ReviewVerdict(
+        status=status,
+        summary=str(review.get("summary", "")),
+        findings=list(findings),
+        evidence_refs=list(evidence_refs),
+        raw_artifact=evidence_refs[0] if evidence_refs else "",
+    )
+
+
+def _merge_input_evidence_refs(merge_input: dict[str, Any] | None) -> list[str]:
+    if not merge_input:
+        return []
+    return [
+        ref
+        for ref in (
+            merge_input.get("result_artifact"),
+            merge_input.get("patch_artifact"),
+        )
+        if isinstance(ref, str) and ref
+    ]
+
+
+def _legacy_change_evidence_refs(changes: dict[str, Any]) -> list[str]:
+    return [
+        ref
+        for ref in (changes.get("artifact"), changes.get("diff_artifact"))
+        if isinstance(ref, str) and ref
+    ]
 
 
 __all__ = ["V4CrewRunner"]
