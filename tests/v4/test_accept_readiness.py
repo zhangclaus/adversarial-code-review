@@ -176,6 +176,27 @@ def test_accept_readiness_allows_latest_ready_round(tmp_path):
     assert decision.to_payload()["round_id"] == "round-1"
 
 
+def test_accept_readiness_uses_ready_payload_round_id_fallback(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    review = _review_completed(store, status="ok")
+    verification = _verification_passed(store)
+    ready = store.append(
+        stream_id="crew-1",
+        type="crew.ready_for_accept",
+        crew_id="crew-1",
+        payload={"round_id": "round-1"},
+    )
+
+    decision = AcceptReadinessGate(event_store=store).evaluate("crew-1")
+
+    assert decision.allowed is True
+    assert decision.reason == "ready"
+    assert decision.round_id == "round-1"
+    assert decision.ready_event_id == ready.event_id
+    assert decision.review_event_id == review.event_id
+    assert decision.verification_event_ids == [verification.event_id]
+
+
 def test_accept_readiness_uses_latest_ready_round(tmp_path):
     store = SQLiteEventStore(tmp_path / "events.sqlite3")
     _review_completed(store, round_id="round-1", status="ok")
