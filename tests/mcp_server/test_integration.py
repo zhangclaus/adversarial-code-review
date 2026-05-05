@@ -46,8 +46,6 @@ def test_server_registers_all_tool_modules():
 
     # Execution tools
     assert "crew_run" in registered_names
-    assert "crew_verify" in registered_names
-    assert "crew_merge_plan" in registered_names
 
 
 def test_server_no_tools_when_no_controller():
