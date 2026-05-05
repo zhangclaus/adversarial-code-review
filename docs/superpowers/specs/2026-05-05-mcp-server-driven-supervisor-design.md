@@ -70,17 +70,88 @@ MCP Client（supervisor，可替换）
 | supervisor | 绑死 Codex | 可替换任意 MCP client |
 | crew_run | Codex 调多次 | 调一次等最终结果 |
 
-## 4. MCP Tools 变化
+## 4. MCP SDK Sampling API（具体实现）
 
-### 4.1 保留的 tools
+### 4.1 Server 端
+
+FastMCP 的 tool handler 通过 `ctx: Context` 参数访问底层 session：
+
+```python
+from mcp.server.fastmcp import Context
+import mcp.types as types
+
+@server.tool("crew_run")
+async def crew_run(
+    crew_id: str,
+    ctx: Context,  # FastMCP 自动注入
+    max_rounds: int = 3,
+    verification_commands: list[str] | None = None,
+) -> list[TextContent]:
+    # 通过 ctx.session 访问底层 ServerSession
+    result = await ctx.session.create_message(
+        messages=[
+            types.SamplingMessage(
+                role="user",
+                content=types.TextContent(
+                    type="text",
+                    text="验证失败 3 次，请决定下一步"
+                ),
+            )
+        ],
+        max_tokens=500,
+        system_prompt="你是 Crew supervisor。",
+    )
+    # result 是 CreateMessageResult
+    # result.content 是 TextContent
+    # result.content.text 是 supervisor 的回复文本
+    reply = result.content.text  # "spawn_worker(label='fixer', mission='...')"
+```
+
+### 4.2 MCP SDK 类型
+
+```python
+# 请求
+types.SamplingMessage(role="user", content=types.TextContent(type="text", text="..."))
+
+# 响应
+class CreateMessageResult:
+    role: str                    # "assistant"
+    content: TextContent         # .text 是回复文本
+    model: str                   # 使用的模型名
+    stopReason: str | None       # "endTurn" 等
+```
+
+### 4.3 Client 端要求
+
+MCP Client 必须提供 `sampling_callback`：
+
+```python
+# Claude Code / Codex 内部实现
+from mcp.client.session import ClientSession
+
+async def my_sampling_callback(context, params):
+    # params.messages 是 SamplingMessage 列表
+    # params.max_tokens
+    # params.system_prompt
+    # 调用 LLM，返回 CreateMessageResult
+    ...
+
+session = ClientSession(read, write, sampling_callback=my_sampling_callback)
+```
+
+如果 client 不支持 sampling，返回 `ErrorData(code=INVALID_REQUEST, message="Sampling not supported")`。
+
+## 5. MCP Tools 变化
+
+### 5.1 保留的 tools
 
 | Tool | 说明 |
 |------|------|
 | `crew_start` | 启动 Crew |
 | `crew_stop` | 停止 Crew |
 | `crew_status` | 获取压缩状态 |
-| `crew_run` | **改造**：长时间运行，内部完整循环 |
-| `crew_accept` | 接受结果（供 Codex 在 sampling 回复之外主动调用） |
+| `crew_run` | **改造**：长时间运行，内部完整循环，通过 sampling 与 supervisor 交互 |
+| `crew_accept` | 接受结果（供 supervisor 在 sampling 回复之外主动调用） |
 | `crew_challenge` | 发出挑战（同上） |
 | `crew_blackboard` | 读黑板 |
 | `crew_events` | 读事件 |
@@ -88,21 +159,22 @@ MCP Client（supervisor，可替换）
 | `crew_changes` | 查看变更 |
 | `crew_diff` | 查看 diff |
 
-### 4.2 删除的 tools
+### 5.2 删除的 tools
 
 | Tool | 原因 |
 |------|------|
 | `crew_decide` | 决策通过 sampling 自然发生，不需要单独 record |
-| `crew_spawn` | Codex 在 sampling 回复中指定 spawn，MCP Server 执行 |
+| `crew_spawn` | supervisor 在 sampling 回复中指定 spawn，MCP Server 执行 |
 | `crew_verify` | 验证是 crew_run 内部自动的 |
 | `crew_merge_plan` | 合并是 accept 的一部分 |
 
-### 4.3 crew_run 改造
+### 5.3 crew_run 具体实现
 
 ```python
 @server.tool("crew_run")
 async def crew_run(
     crew_id: str,
+    ctx: Context,
     max_rounds: int = 3,
     verification_commands: list[str] | None = None,
 ) -> list[TextContent]:
@@ -111,14 +183,18 @@ async def crew_run(
         crew_id=crew_id,
         max_rounds=max_rounds,
         verification_commands=verification_commands or [],
-        sampling_fn=server.request_sampling,  # sampling 回调
+        sampling_fn=lambda msgs, sys_prompt, max_tok: ctx.session.create_message(
+            messages=msgs,
+            max_tokens=max_tok,
+            system_prompt=sys_prompt,
+        ),
     )
     return [TextContent(type="text", text=json.dumps(result))]
 ```
 
-## 5. Supervision Loop 改造
+## 6. Supervision Loop 改造
 
-### 5.1 run() 方法重写
+### 6.1 run() 方法
 
 ```python
 class CrewSupervisorLoop:
@@ -127,7 +203,7 @@ class CrewSupervisorLoop:
         crew_id: str,
         max_rounds: int,
         verification_commands: list[str],
-        sampling_fn,  # MCP sampling 回调
+        sampling_fn,  # async (messages, system_prompt, max_tokens) -> CreateMessageResult
     ) -> dict:
         """完整监督循环。阻塞运行，需要决策时调 sampling_fn。"""
         for round_index in range(1, max_rounds + 1):
@@ -144,7 +220,6 @@ class CrewSupervisorLoop:
                 )
                 if decision["action"] == "accept":
                     return self._do_accept(crew_id)
-                # supervisor 可能选择继续挑战或其他
 
             failure_count = verify_result.get("failure_count", 0)
             if failure_count >= 3:
@@ -161,7 +236,7 @@ class CrewSupervisorLoop:
         return {"crew_id": crew_id, "status": "max_rounds_reached"}
 
     def _wait_for_workers(self, crew_id: str) -> None:
-        """阻塞轮询，直到所有 Worker 完成。"""
+        """阻塞轮询，直到所有 Worker 完成。复用 _wait_for_marker 逻辑。"""
         while True:
             details = self._controller.status(crew_id=crew_id)
             workers = details.get("workers", [])
@@ -181,89 +256,97 @@ class CrewSupervisorLoop:
             self._controller.status(crew_id=crew_id)
         )
         prompt = self._build_decision_prompt(situation, context, compressed)
-        response = sampling_fn(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt="你是 Crew supervisor。根据 context 做战略决策。",
-            max_tokens=500,
-        )
-        return self._parse_decision(response)
 
-    def _build_decision_prompt(self, situation, context, status) -> str:
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(
+            sampling_fn(
+                messages=[
+                    types.SamplingMessage(
+                        role="user",
+                        content=types.TextContent(type="text", text=prompt),
+                    )
+                ],
+                system_prompt="你是 Crew supervisor，负责战略决策。根据提供的 context 选择下一步行动。回复格式：accept / spawn_worker(label, mission) / challenge(worker_id, goal)",
+                max_tokens=500,
+            )
+        )
+        return self._parse_decision(result.content.text)
+
+    def _build_decision_prompt(self, situation: str, context: dict, status: dict) -> str:
         """构建决策提示。"""
-        # 根据 situation 类型构建不同的提示
-        # 附带压缩后的 status 和 context
-        ...
+        if situation == "verification_passed":
+            return (
+                f"## 验证通过\n\n"
+                f"当前状态：{json.dumps(status, ensure_ascii=False)}\n\n"
+                f"验证结果：{json.dumps(context, ensure_ascii=False)}\n\n"
+                f"请确认是否 accept。"
+            )
+        if situation == "verification_failed":
+            return (
+                f"## 验证失败 {context.get('failure_count', '?')} 次\n\n"
+                f"当前状态：{json.dumps(status, ensure_ascii=False)}\n\n"
+                f"验证结果：{json.dumps(context, ensure_ascii=False)}\n\n"
+                f"请选择下一步：\n"
+                f"1. spawn_worker(label, mission) — spawn 新 Worker\n"
+                f"2. accept — 跳过验证接受结果\n"
+                f"3. challenge(worker_id, goal) — 对现有 Worker 发出新挑战"
+            )
+        return f"## {situation}\n\n{json.dumps(context, ensure_ascii=False)}"
 
     def _parse_decision(self, response: str) -> dict:
         """解析 supervisor 的决策回复。"""
-        # 解析 "accept" / "spawn_worker(label, mission)" / "challenge(worker_id, goal)"
-        ...
+        import re
+        text = response.strip()
+
+        if text.startswith("accept"):
+            return {"action": "accept"}
+
+        match = re.match(r'spawn_worker\((.+)\)', text)
+        if match:
+            # 简单解析 key=value 对
+            params = dict(re.findall(r"(\w+)=['\"]([^'\"]+)['\"]", match.group(1)))
+            return {"action": "spawn_worker", **params}
+
+        match = re.match(r'challenge\((.+)\)', text)
+        if match:
+            params = dict(re.findall(r"(\w+)=['\"]([^'\"]+)['\"]", match.group(1)))
+            return {"action": "challenge", **params}
+
+        return {"action": "observe"}
 
     def _execute_decision(self, crew_id: str, decision: dict) -> None:
         """执行 supervisor 的决策。"""
         if decision["action"] == "spawn_worker":
-            contract = WorkerContract(...)
+            contract = WorkerContract(
+                contract_id=f"contract-{decision.get('label', 'worker')}",
+                label=decision.get("label", "worker"),
+                mission=decision.get("mission", ""),
+                required_capabilities=["inspect_code", "edit_source"],
+                authority_level=AuthorityLevel.source_write,
+                workspace_policy=WorkspacePolicy.worktree,
+            )
             self._controller.ensure_worker(crew_id=crew_id, contract=contract)
         elif decision["action"] == "accept":
             self._controller.accept(crew_id=crew_id)
         elif decision["action"] == "challenge":
-            self._controller.challenge(crew_id=crew_id, ...)
+            self._controller.challenge(
+                crew_id=crew_id,
+                worker_id=decision.get("worker_id", ""),
+                goal=decision.get("goal", ""),
+            )
 ```
 
-### 5.2 删除的代码
+### 6.2 删除的代码
 
 - `run_step()` 方法 — 不再需要暂停/恢复
 - `LoopStepResult` 数据类 — 不再需要
 - `_poll_workers()` — 被 `_wait_for_workers()` 替代（阻塞版本）
 
-### 5.3 保留的代码
+### 6.3 保留的代码
 
-- `_wait_for_marker()` — 阻塞轮询（已有，直接复用）
+- `_wait_for_marker()` — 阻塞轮询逻辑可复用
 - `_auto_challenge()` — 自动挑战
 - `_auto_verify()` — 自动验证（需要补全实现）
-- `_build_snapshot()` — 改为 `_build_decision_prompt()`
-
-## 6. Sampling 交互协议
-
-### 6.1 sampling 请求格式
-
-```python
-# MCP Server → Client
-{
-    "messages": [{
-        "role": "user",
-        "content": "## 验证失败 3 次\n\n当前状态：...\n变更文件：...\n\n请选择下一步：\n1. spawn_worker(label, mission)\n2. accept（跳过验证）\n3. challenge(worker_id, goal)"
-    }],
-    "systemPrompt": "你是 Crew supervisor，负责战略决策。根据提供的 context 选择下一步行动。",
-    "maxTokens": 500
-}
-```
-
-### 6.2 sampling 响应格式
-
-```
-# Supervisor 回复（自由文本，MCP Server 解析）
-spawn_worker(label="fixer", mission="修复 pytest 失败的测试用例")
-```
-
-### 6.3 决策解析
-
-MCP Server 解析 supervisor 的文本回复，提取 action 和参数：
-
-```python
-def _parse_decision(self, response: str) -> dict:
-    text = response.strip()
-    if text.startswith("accept"):
-        return {"action": "accept"}
-    if text.startswith("spawn_worker"):
-        # 解析 label, mission
-        return {"action": "spawn_worker", "label": ..., "mission": ...}
-    if text.startswith("challenge"):
-        # 解析 worker_id, goal
-        return {"action": "challenge", "worker_id": ..., "goal": ...}
-    # 默认 observe
-    return {"action": "observe"}
-```
 
 ## 7. Context Layer 保留
 
@@ -283,7 +366,7 @@ Context Layer 功能不变，用途变化：
 - 删除 `CrewDecisionPolicy` 的调用（代码文件保留，不被 MCP Server 使用）
 - 删除 `crew_decide` tool
 - 删除 `crew_spawn` tool
-- 删除 `LoopStepResult` 数据类
+- 删除 `LoopStepResult` 数据类和文件
 
 ## 9. 文件结构变化
 
@@ -297,7 +380,7 @@ src/codex_claude_orchestrator/mcp_server/
         crew_lifecycle.py ← 不变
         crew_context.py   ← 不变
         crew_decision.py  ← 大幅简化（只保留 accept, challenge）
-        crew_execution.py ← 改造（crew_run 长时间运行）
+        crew_execution.py ← 改造（crew_run 长时间运行 + sampling）
     context/
         __init__.py       ← 不变
         compressor.py     ← 不变
@@ -307,28 +390,42 @@ src/codex_claude_orchestrator/mcp_server/
     crew/loop_step_result.py
 
 改造:
-    crew/supervisor_loop.py ← run_step → run（完整循环 + sampling）
+    crew/supervisor_loop.py ← run() 重写为完整循环 + sampling
 ```
 
 ## 10. 测试策略
 
 | 层级 | 变化 |
 |------|------|
-| crew_run | mock sampling_fn，验证长时间运行 + 决策交互 |
-| Supervision Loop | mock sleep + tmux + sampling，验证完整循环 |
+| crew_run | mock ctx.session.create_message，验证长时间运行 + 决策交互 |
+| Supervision Loop | mock sleep + controller + sampling_fn，验证完整循环 |
 | sampling 解析 | 单元测试 _parse_decision，验证各种回复格式 |
 | Context Layer | 不变 |
 | 现有 tests | 删除 test_loop_step_result.py，更新 test_supervisor_loop_step.py |
 
 ## 11. Supervisor 可替换性
 
-MCP Server 不关心谁是 supervisor。`sampling_fn` 是一个回调：
+MCP Server 不关心谁是 supervisor。`sampling_fn` 是一个 async 回调：
 
 ```python
-# 任何 MCP client 都可以接
-sampling_fn = server.request_sampling  # MCP 标准
-sampling_fn = custom_llm_client.ask    # 自定义 LLM
-sampling_fn = human_operator.prompt    # 人工
+# 标准 MCP sampling（通过 ctx.session）
+sampling_fn = lambda msgs, sys, tok: ctx.session.create_message(
+    messages=msgs, max_tokens=tok, system_prompt=sys
+)
+
+# 自定义 LLM
+async def custom_sampling(messages, system_prompt, max_tokens):
+    return await my_llm_client.generate(...)
+
+# 人工 operator
+async def human_sampling(messages, system_prompt, max_tokens):
+    print(messages[0].content.text)
+    reply = input("Your decision: ")
+    return CreateMessageResult(
+        role="assistant",
+        content=TextContent(type="text", text=reply),
+        model="human",
+    )
 ```
 
 这使得 MCP Server 成为通用的多 agent 编排引擎。
