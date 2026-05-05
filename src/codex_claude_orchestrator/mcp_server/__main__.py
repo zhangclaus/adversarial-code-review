@@ -38,12 +38,9 @@ def _build_controller():
 
 async def main() -> None:
     from codex_claude_orchestrator.mcp_server.server import create_server
-    from codex_claude_orchestrator.crew.supervisor_loop import CrewSupervisorLoop
 
     controller = _build_controller()
-    supervision_loop = CrewSupervisorLoop(controller=controller)
-
-    server = create_server(controller=controller, supervision_loop=supervision_loop)
+    server = create_server(controller=controller)
     await server.run_stdio_async()
 
 
