@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "crew-orchestrator": {
+      "command": "python",
+      "args": ["-m", "codex_claude_orchestrator.mcp_server"],
+      "env": {
+        "V4_EVENT_STORE_BACKEND": "sqlite"
+      }
+    }
+  }
+}
