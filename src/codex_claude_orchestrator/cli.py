@@ -2,6 +2,7 @@ import argparse
 import json
 import shutil
 import sys
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
@@ -146,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     crew_run.add_argument("--seed-contract", required=False)
     crew_run.add_argument("--verification-command", action="append", required=True)
     crew_run.add_argument("--max-rounds", type=int, default=3)
-    crew_run.add_argument("--poll-interval", type=float, default=300.0)
+    crew_run.add_argument("--poll-interval", type=float, default=1800.0)
     crew_run.add_argument("--allow-dirty-base", action="store_true")
     crew_run.add_argument("--legacy-loop", action="store_true")
     crew_status = crew_subparsers.add_parser("status", help="Show crew status")
@@ -187,7 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     crew_supervise.add_argument("--crew", required=False)
     crew_supervise.add_argument("--verification-command", action="append", required=True)
     crew_supervise.add_argument("--max-rounds", type=int, default=3)
-    crew_supervise.add_argument("--poll-interval", type=float, default=300.0)
+    crew_supervise.add_argument("--poll-interval", type=float, default=1800.0)
     crew_supervise.add_argument("--dynamic", action="store_true")
     crew_supervise.add_argument("--legacy-loop", action="store_true")
     crew_contracts = crew_subparsers.add_parser("contracts", help="List dynamic worker contracts")
@@ -343,7 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     claude_bridge_supervise.add_argument("--bridge-id", required=False)
     claude_bridge_supervise.add_argument("--verification-command", action="append", required=True)
     claude_bridge_supervise.add_argument("--max-rounds", type=int, default=3)
-    claude_bridge_supervise.add_argument("--poll-interval", type=float, default=300.0)
+    claude_bridge_supervise.add_argument("--poll-interval", type=float, default=1800.0)
     claude_bridge_run = claude_bridge_subparsers.add_parser(
         "run",
         help="Start a supervised Claude bridge and run the Codex supervisor loop",
@@ -362,7 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     claude_bridge_run.add_argument("--verification-command", action="append", required=True)
     claude_bridge_run.add_argument("--max-rounds", type=int, default=3)
-    claude_bridge_run.add_argument("--poll-interval", type=float, default=300.0)
+    claude_bridge_run.add_argument("--poll-interval", type=float, default=1800.0)
 
     term = subparsers.add_parser("term", help="Manage tmux terminal consoles")
     term_subparsers = term.add_subparsers(dest="term_command", required=True)
@@ -484,7 +485,7 @@ def build_v4_merge_transaction(
     )
 
 
-def build_v4_crew_runner(repo_root: Path, controller: CrewController, poll_timeout: float = 300.0) -> V4CrewRunner:
+def build_v4_crew_runner(repo_root: Path, controller: CrewController, poll_timeout: float = 1800.0) -> V4CrewRunner:
     recorder = CrewRecorder(repo_root / ".orchestrator")
     message_bus = AgentMessageBus(recorder)
     protocol_store = ProtocolRequestStore(recorder)
@@ -880,6 +881,13 @@ def handle_crew_command(args) -> int:
         return 0
 
     if args.crew_command == "run":
+        if args.legacy_loop:
+            warnings.warn(
+                "--legacy-loop is deprecated and will be removed in a future version. "
+                "The V4 crew runner is now the default.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         runner = build_crew_supervisor_loop(controller) if args.legacy_loop else build_v4_crew_runner(repo_root, controller, poll_timeout=args.poll_interval)
         if args.spawn_policy == "dynamic" and args.workers == "auto":
             result = runner.run(
@@ -970,6 +978,13 @@ def handle_crew_command(args) -> int:
         print(json.dumps(controller.merge_plan(crew_id=crew_id), ensure_ascii=False))
         return 0
     if args.crew_command == "supervise":
+        if args.legacy_loop:
+            warnings.warn(
+                "--legacy-loop is deprecated and will be removed in a future version. "
+                "The V4 crew runner is now the default.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         runner = build_crew_supervisor_loop(controller) if args.legacy_loop else build_v4_crew_runner(repo_root, controller, poll_timeout=args.poll_interval)
         if args.dynamic and args.legacy_loop:
             print(

@@ -31,7 +31,7 @@ class ClaudeCodeTmuxAdapter:
         native_session,
         poll_initial_delay: float = 2.0,
         poll_max_delay: float = 10.0,
-        poll_timeout: float = 300.0,
+        poll_timeout: float = 1800.0,
     ):
         self._native_session = native_session
         self._workers: dict[str, WorkerSpec] = {}

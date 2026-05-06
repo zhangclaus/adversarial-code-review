@@ -50,7 +50,7 @@ def test_tmux_adapter_poll_defaults():
     adapter = ClaudeCodeTmuxAdapter(native_session=native)
     assert adapter._poll_initial_delay == 2.0
     assert adapter._poll_max_delay == 10.0
-    assert adapter._poll_timeout == 300.0
+    assert adapter._poll_timeout == 1800.0
 
 
 def test_tmux_adapter_delivers_turn_to_native_session():
