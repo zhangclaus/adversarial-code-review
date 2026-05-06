@@ -39,10 +39,12 @@ def test_tmux_adapter_accepts_poll_parameters():
         poll_initial_delay=1.0,
         poll_max_delay=5.0,
         poll_timeout=60.0,
+        poll_retries=5,
     )
     assert adapter._poll_initial_delay == 1.0
     assert adapter._poll_max_delay == 5.0
     assert adapter._poll_timeout == 60.0
+    assert adapter._poll_retries == 5
 
 
 def test_tmux_adapter_poll_defaults():
@@ -51,6 +53,7 @@ def test_tmux_adapter_poll_defaults():
     assert adapter._poll_initial_delay == 2.0
     assert adapter._poll_max_delay == 10.0
     assert adapter._poll_timeout == 1800.0
+    assert adapter._poll_retries == 3
 
 
 def test_tmux_adapter_delivers_turn_to_native_session():
@@ -252,6 +255,7 @@ def test_tmux_adapter_watch_turn_marker_not_seen_emits_only_output_chunk(monkeyp
     adapter = ClaudeCodeTmuxAdapter(
         native_session=native,
         poll_timeout=0.0,
+        poll_retries=0,
     )
     monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
     turn = TurnEnvelope(
@@ -295,6 +299,7 @@ def test_tmux_adapter_watch_turn_emits_required_outbox_without_marker(tmp_path: 
     adapter = ClaudeCodeTmuxAdapter(
         native_session=native,
         poll_timeout=0.0,
+        poll_retries=0,
     )
     monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
     turn = TurnEnvelope(
@@ -382,6 +387,7 @@ def test_tmux_adapter_filesystem_stream_dedupes_outbox_between_polls(tmp_path: P
     adapter = ClaudeCodeTmuxAdapter(
         native_session=native,
         poll_timeout=0.0,
+        poll_retries=0,
     )
     monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
     turn = TurnEnvelope(
@@ -414,6 +420,7 @@ def test_tmux_adapter_watch_turn_ignores_malformed_observation_values(monkeypatc
     adapter = ClaudeCodeTmuxAdapter(
         native_session=native,
         poll_timeout=0.0,
+        poll_retries=0,
     )
     monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
     turn = TurnEnvelope(
@@ -752,3 +759,110 @@ def test_watch_turn_observe_failed_returns_immediately(monkeypatch):
     assert events[0].type == "runtime.observe_failed"
     assert events[0].payload["source"] == "tmux"
     assert "tmux session dead" in events[0].payload["error"]
+
+
+def test_watch_turn_poll_retry_yields_retry_event(monkeypatch):
+    """First timeout yields runtime.poll_retry, not runtime.poll_timeout."""
+    native = FakeNativeSession()
+    native.observe_result = {
+        "snapshot": "working",
+        "marker": "marker-1",
+        "marker_seen": False,
+        "transcript_artifact": "",
+    }
+    adapter = ClaudeCodeTmuxAdapter(
+        native_session=native,
+        poll_timeout=0.0,
+        poll_retries=2,
+    )
+    monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
+    turn = TurnEnvelope(
+        crew_id="crew-1", worker_id="worker-1", turn_id="turn-1",
+        round_id="round-1", phase="source", message="go", expected_marker="marker-1",
+    )
+
+    events = list(adapter.watch_turn(turn))
+    types = [e.type for e in events]
+
+    # First timeout → retry event (attempt 1 of 3)
+    assert types.count("runtime.poll_retry") == 2
+    retry_events = [e for e in events if e.type == "runtime.poll_retry"]
+    assert retry_events[0].payload["attempt"] == 1
+    assert retry_events[0].payload["max_attempts"] == 3
+    assert retry_events[1].payload["attempt"] == 2
+    # Final timeout after retries exhausted
+    assert "runtime.poll_timeout" in types
+    timeout_event = [e for e in events if e.type == "runtime.poll_timeout"][0]
+    assert timeout_event.payload["total_attempts"] == 3
+
+
+def test_watch_turn_poll_timeout_after_all_retries_exhausted(monkeypatch):
+    """With poll_retries=0, timeout immediately yields runtime.poll_timeout."""
+    native = FakeNativeSession()
+    native.observe_result = {
+        "snapshot": "",
+        "marker": "marker-1",
+        "marker_seen": False,
+        "transcript_artifact": "",
+    }
+    adapter = ClaudeCodeTmuxAdapter(
+        native_session=native,
+        poll_timeout=0.0,
+        poll_retries=0,
+    )
+    monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
+    turn = TurnEnvelope(
+        crew_id="crew-1", worker_id="worker-1", turn_id="turn-1",
+        round_id="round-1", phase="source", message="go", expected_marker="marker-1",
+    )
+
+    events = list(adapter.watch_turn(turn))
+    types = [e.type for e in events]
+
+    assert "runtime.poll_retry" not in types
+    assert types.count("runtime.poll_timeout") == 1
+
+
+def test_watch_turn_marker_found_during_retry(monkeypatch):
+    """Marker found on second attempt terminates normally."""
+    call_count = 0
+    def observe_with_late_marker(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 1:
+            # First attempt: no marker
+            return {
+                "snapshot": "still working",
+                "marker": "marker-1",
+                "marker_seen": False,
+                "transcript_artifact": "",
+            }
+        # Second attempt (retry): marker found
+        return {
+            "snapshot": "done\nmarker-1",
+            "marker": "marker-1",
+            "marker_seen": True,
+            "transcript_artifact": "turns/turn-1/transcript.txt",
+        }
+
+    native = FakeNativeSession()
+    native.observe = observe_with_late_marker
+    adapter = ClaudeCodeTmuxAdapter(
+        native_session=native,
+        poll_initial_delay=0.0,
+        poll_timeout=0.0,
+        poll_retries=2,
+    )
+    monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
+    turn = TurnEnvelope(
+        crew_id="crew-1", worker_id="worker-1", turn_id="turn-1",
+        round_id="round-1", phase="source", message="go", expected_marker="marker-1",
+    )
+
+    events = list(adapter.watch_turn(turn))
+    types = [e.type for e in events]
+
+    assert "runtime.poll_timeout" not in types
+    assert types.count("runtime.poll_retry") == 1
+    assert types[-1] == "marker.detected"
+    assert events[-1].payload["marker"] == "marker-1"

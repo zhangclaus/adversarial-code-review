@@ -148,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     crew_run.add_argument("--verification-command", action="append", required=True)
     crew_run.add_argument("--max-rounds", type=int, default=3)
     crew_run.add_argument("--poll-interval", type=float, default=1800.0)
+    crew_run.add_argument("--poll-retries", type=int, default=3)
     crew_run.add_argument("--allow-dirty-base", action="store_true")
     crew_run.add_argument("--legacy-loop", action="store_true")
     crew_status = crew_subparsers.add_parser("status", help="Show crew status")
@@ -189,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     crew_supervise.add_argument("--verification-command", action="append", required=True)
     crew_supervise.add_argument("--max-rounds", type=int, default=3)
     crew_supervise.add_argument("--poll-interval", type=float, default=1800.0)
+    crew_supervise.add_argument("--poll-retries", type=int, default=3)
     crew_supervise.add_argument("--dynamic", action="store_true")
     crew_supervise.add_argument("--legacy-loop", action="store_true")
     crew_contracts = crew_subparsers.add_parser("contracts", help="List dynamic worker contracts")
@@ -485,7 +487,7 @@ def build_v4_merge_transaction(
     )
 
 
-def build_v4_crew_runner(repo_root: Path, controller: CrewController, poll_timeout: float = 1800.0) -> V4CrewRunner:
+def build_v4_crew_runner(repo_root: Path, controller: CrewController, poll_timeout: float = 1800.0, poll_retries: int = 3) -> V4CrewRunner:
     recorder = CrewRecorder(repo_root / ".orchestrator")
     message_bus = AgentMessageBus(recorder)
     protocol_store = ProtocolRequestStore(recorder)
@@ -496,6 +498,7 @@ def build_v4_crew_runner(repo_root: Path, controller: CrewController, poll_timeo
         adapter=ClaudeCodeTmuxAdapter(
             native_session=NativeClaudeSession(open_terminal_on_start=False),
             poll_timeout=poll_timeout,
+            poll_retries=poll_retries,
         ),
         turn_context_builder=TurnContextBuilder(
             message_bus,
@@ -888,7 +891,7 @@ def handle_crew_command(args) -> int:
                 DeprecationWarning,
                 stacklevel=2,
             )
-        runner = build_crew_supervisor_loop(controller) if args.legacy_loop else build_v4_crew_runner(repo_root, controller, poll_timeout=args.poll_interval)
+        runner = build_crew_supervisor_loop(controller) if args.legacy_loop else build_v4_crew_runner(repo_root, controller, poll_timeout=args.poll_interval, poll_retries=args.poll_retries)
         if args.spawn_policy == "dynamic" and args.workers == "auto":
             result = runner.run(
                 repo_root=repo_root,
@@ -985,7 +988,7 @@ def handle_crew_command(args) -> int:
                 DeprecationWarning,
                 stacklevel=2,
             )
-        runner = build_crew_supervisor_loop(controller) if args.legacy_loop else build_v4_crew_runner(repo_root, controller, poll_timeout=args.poll_interval)
+        runner = build_crew_supervisor_loop(controller) if args.legacy_loop else build_v4_crew_runner(repo_root, controller, poll_timeout=args.poll_interval, poll_retries=args.poll_retries)
         if args.dynamic and args.legacy_loop:
             print(
                 json.dumps(

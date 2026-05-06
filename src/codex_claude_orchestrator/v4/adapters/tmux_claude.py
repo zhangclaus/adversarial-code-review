@@ -32,12 +32,14 @@ class ClaudeCodeTmuxAdapter:
         poll_initial_delay: float = 2.0,
         poll_max_delay: float = 10.0,
         poll_timeout: float = 1800.0,
+        poll_retries: int = 3,
     ):
         self._native_session = native_session
         self._workers: dict[str, WorkerSpec] = {}
         self._poll_initial_delay = poll_initial_delay
         self._poll_max_delay = poll_max_delay
         self._poll_timeout = poll_timeout
+        self._poll_retries = poll_retries
 
     def register_worker(self, spec: WorkerSpec) -> WorkerHandle:
         self._workers[spec.worker_id] = spec
@@ -78,77 +80,95 @@ class ClaudeCodeTmuxAdapter:
         terminal_pane = _terminal_pane_for(turn, worker)
         yield from self._watch_filesystem_stream(turn, worker)
 
-        delay = self._poll_initial_delay
-        deadline = time.monotonic() + self._poll_timeout
+        max_attempts = 1 + self._poll_retries
         last_text = ""
         last_artifact_refs: list[str] = []
 
-        while True:
-            try:
-                observation = self._native_session.observe(
-                    terminal_pane=terminal_pane,
-                    lines=200,
-                    turn_marker=turn.expected_marker,
-                )
-            except Exception as exc:
-                yield RuntimeEvent(
-                    type="runtime.observe_failed",
-                    turn_id=turn.turn_id,
-                    worker_id=turn.worker_id,
-                    payload={"source": "tmux", "error": str(exc)},
-                )
-                return
+        for attempt in range(max_attempts):
+            delay = self._poll_initial_delay
+            deadline = time.monotonic() + self._poll_timeout
 
-            text = _non_empty_str(observation.get("snapshot"))
-            transcript_artifact = _non_empty_str(observation.get("transcript_artifact"))
-            artifact_refs = [transcript_artifact] if transcript_artifact else []
-
-            # Incremental output: only yield new text
-            if text and text != last_text:
-                if len(text) >= len(last_text):
-                    new_part = text[len(last_text):]
-                else:
-                    # Terminal scrolled — old output lost, yield full snapshot
-                    new_part = text
-                if new_part.strip():
+            while True:
+                try:
+                    observation = self._native_session.observe(
+                        terminal_pane=terminal_pane,
+                        lines=200,
+                        turn_marker=turn.expected_marker,
+                    )
+                except Exception as exc:
                     yield RuntimeEvent(
-                        type="output.chunk",
+                        type="runtime.observe_failed",
                         turn_id=turn.turn_id,
                         worker_id=turn.worker_id,
-                        payload={"text": new_part},
-                        artifact_refs=artifact_refs,
+                        payload={"source": "tmux", "error": str(exc)},
                     )
-                last_text = text
-                last_artifact_refs = artifact_refs
+                    return
 
-            # Marker found
-            if observation.get("marker_seen") is True:
-                marker = _non_empty_str(observation.get("marker")) or turn.expected_marker
-                yield RuntimeEvent(
-                    type="marker.detected",
-                    turn_id=turn.turn_id,
-                    worker_id=turn.worker_id,
-                    payload={
-                        "marker": marker,
-                        "source": "tmux",
-                    },
-                    artifact_refs=last_artifact_refs or artifact_refs,
-                )
-                return
+                text = _non_empty_str(observation.get("snapshot"))
+                transcript_artifact = _non_empty_str(observation.get("transcript_artifact"))
+                artifact_refs = [transcript_artifact] if transcript_artifact else []
 
-            # Timeout
-            if time.monotonic() >= deadline:
-                yield RuntimeEvent(
-                    type="runtime.poll_timeout",
-                    turn_id=turn.turn_id,
-                    worker_id=turn.worker_id,
-                    payload={"timeout_seconds": self._poll_timeout},
-                )
-                return
+                # Incremental output: only yield new text
+                if text and text != last_text:
+                    if len(text) >= len(last_text):
+                        new_part = text[len(last_text):]
+                    else:
+                        # Terminal scrolled — old output lost, yield full snapshot
+                        new_part = text
+                    if new_part.strip():
+                        yield RuntimeEvent(
+                            type="output.chunk",
+                            turn_id=turn.turn_id,
+                            worker_id=turn.worker_id,
+                            payload={"text": new_part},
+                            artifact_refs=artifact_refs,
+                        )
+                    last_text = text
+                    last_artifact_refs = artifact_refs
 
-            # Backoff sleep
-            time.sleep(delay)
-            delay = min(delay * 2, self._poll_max_delay)
+                # Marker found
+                if observation.get("marker_seen") is True:
+                    marker = _non_empty_str(observation.get("marker")) or turn.expected_marker
+                    yield RuntimeEvent(
+                        type="marker.detected",
+                        turn_id=turn.turn_id,
+                        worker_id=turn.worker_id,
+                        payload={
+                            "marker": marker,
+                            "source": "tmux",
+                        },
+                        artifact_refs=last_artifact_refs or artifact_refs,
+                    )
+                    return
+
+                # Timeout
+                if time.monotonic() >= deadline:
+                    if attempt < max_attempts - 1:
+                        yield RuntimeEvent(
+                            type="runtime.poll_retry",
+                            turn_id=turn.turn_id,
+                            worker_id=turn.worker_id,
+                            payload={
+                                "attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "timeout_seconds": self._poll_timeout,
+                            },
+                        )
+                        break  # break inner loop, continue outer retry loop
+                    yield RuntimeEvent(
+                        type="runtime.poll_timeout",
+                        turn_id=turn.turn_id,
+                        worker_id=turn.worker_id,
+                        payload={
+                            "timeout_seconds": self._poll_timeout,
+                            "total_attempts": max_attempts,
+                        },
+                    )
+                    return
+
+                # Backoff sleep
+                time.sleep(delay)
+                delay = min(delay * 2, self._poll_max_delay)
 
     def _watch_filesystem_stream(self, turn: TurnEnvelope, worker: WorkerSpec | None):
         outbox_path = _required_outbox_path(turn)
