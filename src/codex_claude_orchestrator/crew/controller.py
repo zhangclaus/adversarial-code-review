@@ -334,7 +334,7 @@ class CrewController:
             raise ValueError(f"unsafe artifact name: {artifact_name}")
 
     def resume_context(self, *, crew_id: str) -> dict:
-        details = self._recorder.read_crew(crew_id)
+        details = self._read_crew(crew_id)
         return {
             "crew": details["crew"],
             "team_snapshot": details.get("team_snapshot"),
@@ -355,6 +355,18 @@ class CrewController:
         }
 
     def status(self, *, repo_root: Path, crew_id: str) -> dict:
+        return self._read_crew(crew_id)
+
+    def _read_crew(self, crew_id: str) -> dict:
+        """Try EventStore projection first, fall back to CrewRecorder."""
+        if self._domain_events:
+            from codex_claude_orchestrator.v4.crew_state_projection import CrewStateProjection
+
+            events = self._domain_events._events.list_stream(crew_id)
+            if events:
+                proj = CrewStateProjection.from_events(events)
+                if proj.has_events():
+                    return proj.to_read_crew_dict()
         return self._recorder.read_crew(crew_id)
 
     def blackboard_entries(self, *, crew_id: str) -> list[dict]:
