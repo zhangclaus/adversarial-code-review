@@ -19,9 +19,19 @@ def _worker_summary(worker: dict) -> str:
     return f"{role} - {status}"
 
 
+def _extract_latest_summary(blackboard: list[dict]) -> str:
+    """Extract the content of the latest summary entry."""
+    summaries = [e for e in blackboard if e.get("type") == "summary"]
+    if not summaries:
+        return ""
+    latest = max(summaries, key=lambda e: e.get("timestamp", ""))
+    return latest.get("content", "")
+
+
 def compress_crew_status(raw: dict) -> dict:
     crew = raw.get("crew", {})
     workers = raw.get("workers", [])
+    blackboard = raw.get("blackboard", [])
     return {
         "crew_id": crew.get("crew_id"),
         "goal": crew.get("root_goal"),
@@ -38,6 +48,7 @@ def compress_crew_status(raw: dict) -> dict:
         "verification_passed": _check_verification_passed(raw),
         "verification_failures": _count_failures(raw),
         "changed_files": _extract_changed_files(raw),
+        "summary": _extract_latest_summary(blackboard),
     }
 
 

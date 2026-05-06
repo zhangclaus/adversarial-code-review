@@ -39,6 +39,35 @@ def test_compress_crew_status_workers_summary():
     assert "summary" in result["workers"][0]
 
 
+def test_compress_crew_status_includes_latest_summary():
+    """compress_crew_status extracts the latest summary entry from blackboard."""
+    raw = {
+        "crew": {"crew_id": "c1", "root_goal": "test", "status": "running"},
+        "workers": [],
+        "blackboard": [
+            {"type": "fact", "content": "old fact", "timestamp": "2026-05-06T10:00:00"},
+            {"type": "summary", "content": "first summary", "timestamp": "2026-05-06T11:00:00"},
+            {"type": "fact", "content": "new fact", "timestamp": "2026-05-06T12:00:00"},
+            {"type": "summary", "content": "latest summary", "timestamp": "2026-05-06T13:00:00"},
+        ],
+    }
+    result = compress_crew_status(raw)
+    assert result["summary"] == "latest summary"
+
+
+def test_compress_crew_status_no_summary():
+    """compress_crew_status returns empty string when no summary exists."""
+    raw = {
+        "crew": {"crew_id": "c1", "root_goal": "test", "status": "running"},
+        "workers": [],
+        "blackboard": [
+            {"type": "fact", "content": "a fact", "timestamp": "2026-05-06T10:00:00"},
+        ],
+    }
+    result = compress_crew_status(raw)
+    assert result["summary"] == ""
+
+
 def test_compress_blackboard_default_limit():
     entries = [{"entry_id": f"e{i}", "content": f"item {i}"} for i in range(30)]
     result = compress_blackboard(entries)
