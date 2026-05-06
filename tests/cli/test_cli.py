@@ -1331,7 +1331,7 @@ def test_main_crew_supervise_and_run_route_to_v4_crew_runner_by_default(
     monkeypatch.setattr("codex_claude_orchestrator.cli.build_crew_controller", lambda repo_root: fake_controller)
     monkeypatch.setattr(
         "codex_claude_orchestrator.cli.build_v4_crew_runner",
-        lambda repo_root, controller: fake_runner,
+        lambda repo_root, controller, poll_timeout=300.0: fake_runner,
     )
 
     stdout = StringIO()
@@ -1465,7 +1465,7 @@ def test_main_crew_run_defaults_to_dynamic_even_for_review_heavy_goal(tmp_path: 
     monkeypatch.setattr("codex_claude_orchestrator.cli.build_crew_controller", lambda repo_root: fake_controller)
     monkeypatch.setattr(
         "codex_claude_orchestrator.cli.build_v4_crew_runner",
-        lambda repo_root, controller: fake_runner,
+        lambda repo_root, controller, poll_timeout=300.0: fake_runner,
     )
 
     stdout = StringIO()
@@ -1500,7 +1500,7 @@ def test_main_crew_run_can_use_static_legacy_worker_selection(tmp_path: Path, mo
     monkeypatch.setattr("codex_claude_orchestrator.cli.build_crew_controller", lambda repo_root: fake_controller)
     monkeypatch.setattr(
         "codex_claude_orchestrator.cli.build_v4_crew_runner",
-        lambda repo_root, controller: fake_runner,
+        lambda repo_root, controller, poll_timeout=300.0: fake_runner,
     )
 
     stdout = StringIO()

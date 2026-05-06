@@ -39,7 +39,6 @@ from codex_claude_orchestrator.v4.crew_runner import V4CrewRunner
 from codex_claude_orchestrator.v4.event_store_factory import build_v4_event_store
 from codex_claude_orchestrator.v4.merge_transaction import V4MergeTransaction
 from codex_claude_orchestrator.v4.message_ack import MessageAckProcessor
-from codex_claude_orchestrator.v4.projections import CrewProjection
 from codex_claude_orchestrator.v4.supervisor import V4Supervisor
 from codex_claude_orchestrator.v4.turn_context import TurnContextBuilder
 from codex_claude_orchestrator.verification.runner import VerificationRunner
@@ -926,22 +925,17 @@ def handle_crew_command(args) -> int:
         event_store = build_v4_event_store(repo_root, readonly=True)
         v4_events = event_store.list_stream(crew_id)
         if v4_events:
-            projection = CrewProjection.from_events(v4_events)
-            print(
-                json.dumps(
-                    {
-                        "runtime": "v4",
-                        "crew": {
-                            "crew_id": projection.crew_id,
-                            "root_goal": projection.goal,
-                            "status": projection.status,
-                        },
-                        "projection": projection.to_dict(),
-                    },
-                    ensure_ascii=False,
+            from codex_claude_orchestrator.v4.crew_state_projection import CrewStateProjection
+
+            proj = CrewStateProjection.from_events(v4_events)
+            if proj.has_events():
+                print(
+                    json.dumps(
+                        {"runtime": "v4", **proj.to_read_crew_dict()},
+                        ensure_ascii=False,
+                    )
                 )
-            )
-            return 0
+                return 0
         print(json.dumps(controller.status(repo_root=repo_root, crew_id=crew_id), ensure_ascii=False))
         return 0
     if args.crew_command == "blackboard":
