@@ -27,8 +27,18 @@ These predefined labels have sensible defaults:
 | `repo-context-scout` | readonly | readonly | Need to explore codebase first |
 | `patch-risk-auditor` | readonly | readonly | Reviewing changes before accept |
 | `verification-failure-analyst` | source_write | worktree | Diagnosing repeated test failures |
+| `summarizer` | readonly | readonly | Auto-spawns when blackboard > 20 entries |
 
 You can also use any custom label with a specific mission.
+
+## Auto-Summarization
+
+When `crew_blackboard` detects more than 20 entries without a fresh summary, a `summarizer` Worker is automatically spawned. The summarizer reads all blackboard entries and writes a concise summary back as a `summary` entry.
+
+You can:
+- Read the summary: `crew_blackboard(crew_id, entry_type="summary")`
+- Review it in `crew_status` output (the `summary` field)
+- Challenge it: `crew_challenge(crew_id, summary="summary missed X", task_id=summarizer_id)`
 
 ## Orchestration Loop
 
