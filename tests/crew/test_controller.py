@@ -164,7 +164,7 @@ def test_crew_controller_fake_flow_start_send_verify_challenge_accept(tmp_path: 
 
     assert sent["marker_seen"] is True
     assert verification["passed"] is True
-    assert challenge["type"] == "risk"
+    assert challenge["summary"] == "Need more evidence"
     assert accepted["status"] == "accepted"
     assert pool.stopped_crews[0]["crew_id"] == "crew-1"
 
@@ -518,13 +518,23 @@ def test_controller_resume_context_collects_snapshot_and_replay_inputs(tmp_path:
 # ---------------------------------------------------------------------------
 
 
+class _FakeEvent:
+    """Minimal event object with event_id attribute."""
+    def __init__(self, event_id: str, **kwargs):
+        self.event_id = event_id
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
 class FakeEventStore:
     """In-memory event store for testing dual-write behavior."""
 
     def __init__(self):
         self.events: list[dict] = []
+        self._counter = 0
 
     def append(self, *, stream_id, type: str, crew_id="", worker_id="", **kwargs):
+        self._counter += 1
         event = {
             "stream_id": stream_id,
             "type": type,
@@ -534,7 +544,16 @@ class FakeEventStore:
             "payload": kwargs.get("payload"),
         }
         self.events.append(event)
-        return event
+        return _FakeEvent(
+            event_id=f"evt-{self._counter}",
+            stream_id=stream_id,
+            type=type,
+            crew_id=crew_id,
+            worker_id=worker_id,
+            idempotency_key=kwargs.get("idempotency_key", ""),
+            payload=kwargs.get("payload"),
+            artifact_refs=kwargs.get("artifact_refs", []),
+        )
 
     def append_claim(self, **kwargs):
         return self.append(**kwargs), True
@@ -707,13 +726,13 @@ def test_controller_challenge_emits_blackboard_entry_event(tmp_path: Path):
 
     controller.challenge(crew_id=crew.crew_id, summary="Need more evidence")
 
-    bb_events = [e for e in event_store.events if e["type"] == "blackboard.entry"]
-    # One from start_dynamic initial decision, one from challenge
-    assert len(bb_events) == 2
-    risk_events = [e for e in bb_events if e["payload"].get("entry_type") == "risk"]
-    assert len(risk_events) == 1
-    assert risk_events[0]["crew_id"] == "crew-1"
-    assert risk_events[0]["payload"]["content"] == "Need more evidence"
+    # challenge() now emits challenge.issued + repair.requested events
+    challenge_events = [e for e in event_store.events if e["type"] == "challenge.issued"]
+    repair_events = [e for e in event_store.events if e["type"] == "repair.requested"]
+    assert len(challenge_events) == 1
+    assert len(repair_events) == 1
+    assert challenge_events[0]["crew_id"] == "crew-1"
+    assert challenge_events[0]["payload"]["finding"] == "Need more evidence"
 
 
 def test_controller_works_without_event_store(tmp_path: Path):
@@ -744,3 +763,31 @@ def test_controller_works_without_event_store(tmp_path: Path):
 
     # No assertion needed — just verify no exceptions were raised
     assert crew.crew_id == "crew-1"
+
+
+def test_accept_returns_success_even_if_stop_crew_fails(tmp_path: Path):
+    """accept() should return success even if stop_crew raises."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = CrewRecorder(repo_root / ".orchestrator")
+
+    class FailingStopCrewPool(FakeWorkerPool):
+        def stop_crew(self, **kwargs):
+            raise RuntimeError("tmux session is gone")
+
+    pool = FailingStopCrewPool()
+    controller = CrewController(
+        recorder=recorder,
+        blackboard=BlackboardStore(recorder),
+        task_graph=TaskGraphPlanner(task_id_factory=lambda role: f"task-{role.value}"),
+        worker_pool=pool,
+        crew_id_factory=lambda: "crew-1",
+        entry_id_factory=lambda: "entry-accept-fail",
+    )
+    crew = controller.start_dynamic(repo_root=repo_root, goal="Build V3 MVP")
+
+    result = controller.accept(crew_id=crew.crew_id, summary="accepted with evidence")
+
+    assert result["status"] == "accepted"
+    assert "error" in result["stop"]
+    assert "tmux session is gone" in result["stop"]["error"]

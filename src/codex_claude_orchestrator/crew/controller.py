@@ -445,44 +445,85 @@ class CrewController:
     def prune_orphans(self, *, repo_root: Path) -> dict:
         return self._worker_pool.prune_orphans(repo_root=repo_root)
 
-    def verify(self, *, crew_id: str, command: str, worker_id: str | None = None) -> dict:
+    def verify(self, *, crew_id: str, command: str, worker_id: str | None = None, round_id: str = "", contract_id: str = "") -> dict:
         if self._verification_runner is None:
             raise ValueError("crew verification runner is not configured")
         target_worker_id, cwd = self._verification_target(crew_id, worker_id)
-        return self._verification_runner.run(
+        result = self._verification_runner.run(
             crew_id=crew_id,
             command=command,
             cwd=cwd,
             target_worker_id=target_worker_id,
         )
+        if self._domain_events:
+            artifact_refs = _artifact_refs_from_result(result)
+            if result.get("passed", False):
+                self._domain_events.emit_verification_passed(
+                    crew_id, target_worker_id, command, result,
+                    round_id=round_id, contract_id=contract_id, artifact_refs=artifact_refs,
+                )
+            else:
+                self._domain_events.emit_verification_failed(
+                    crew_id, target_worker_id, command, result,
+                    round_id=round_id, contract_id=contract_id, artifact_refs=artifact_refs,
+                )
+        return result
 
-    def challenge(self, *, crew_id: str, summary: str, task_id: str | None = None) -> dict:
-        entry = BlackboardEntry(
-            entry_id=self._entry_id_factory(),
-            crew_id=crew_id,
-            task_id=task_id,
-            actor_type=ActorType.CODEX,
-            actor_id="codex",
-            type=BlackboardEntryType.RISK,
-            content=summary,
-            confidence=1.0,
-        )
-        self._blackboard.append(entry)
+    def challenge(
+        self,
+        *,
+        crew_id: str,
+        summary: str,
+        task_id: str | None = None,
+        worker_id: str = "",
+        category: str = "",
+        source_event_ids: list[str] | None = None,
+        round_id: str = "",
+        contract_id: str = "",
+        artifact_refs: list[str] | None = None,
+    ) -> dict:
+        if self._domain_events:
+            challenge_event = self._domain_events.emit_challenge_issued(
+                crew_id, worker_id, summary,
+                category=category, source_event_ids=source_event_ids,
+                round_id=round_id, contract_id=contract_id, artifact_refs=artifact_refs,
+            )
+            self._domain_events.emit_repair_requested(
+                crew_id, worker_id, summary,
+                challenge_event_id=challenge_event.event_id,
+                round_id=round_id, contract_id=contract_id, artifact_refs=artifact_refs,
+            )
         self._mark_task_status(crew_id, task_id, CrewTaskStatus.CHALLENGED)
-        return entry.to_dict()
+        return {"crew_id": crew_id, "summary": summary, "task_id": task_id}
 
     def accept(self, *, crew_id: str, summary: str) -> dict:
+        details = self._recorder.read_crew(crew_id)
+        repo = details["crew"]["repo"]
         self._recorder.finalize_crew(crew_id, CrewStatus.ACCEPTED, summary)
         if self._domain_events:
             self._domain_events.emit_crew_finalized(crew_id, "accepted", summary)
-        stop_result = self._worker_pool.stop_crew(repo_root=Path(self._recorder.read_crew(crew_id)["crew"]["repo"]), crew_id=crew_id)
+        try:
+            stop_result = self._worker_pool.stop_crew(repo_root=Path(repo), crew_id=crew_id)
+        except Exception as exc:
+            stop_result = {"error": str(exc)}
         return {"crew_id": crew_id, "status": CrewStatus.ACCEPTED.value, "summary": summary, "stop": stop_result}
 
-    def changes(self, *, crew_id: str, worker_id: str) -> dict:
+    def changes(self, *, crew_id: str, worker_id: str | None = None) -> dict | list:
         if self._change_recorder is None:
             raise ValueError("crew change recorder is not configured")
-        allocation = self._read_worker_allocation(crew_id, worker_id)
-        return self._change_recorder.record_changes(crew_id, worker_id, allocation)
+        if worker_id:
+            allocation = self._read_worker_allocation(crew_id, worker_id)
+            return self._change_recorder.record_changes(crew_id, worker_id, allocation)
+        details = self._recorder.read_crew(crew_id)
+        all_changes = []
+        for worker in details["workers"]:
+            wid = worker["worker_id"]
+            try:
+                allocation = self._read_worker_allocation(crew_id, wid)
+                all_changes.append(self._change_recorder.record_changes(crew_id, wid, allocation))
+            except (FileNotFoundError, KeyError):
+                continue
+        return all_changes
 
     def merge_plan(self, *, crew_id: str) -> dict:
         if self._merge_arbiter is None:
@@ -586,3 +627,16 @@ class CrewController:
             ended_at=payload.get("ended_at"),
             final_summary=payload.get("final_summary", ""),
         )
+
+
+def _artifact_refs_from_result(result: dict) -> list[str]:
+    """Extract artifact refs from a verification result dict."""
+    refs = []
+    artifact_refs = result.get("artifact_refs", [])
+    if isinstance(artifact_refs, list):
+        refs.extend(ref for ref in artifact_refs if isinstance(ref, str) and ref)
+    for key in ("artifact", "stdout_artifact", "stderr_artifact"):
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            refs.append(value)
+    return list(dict.fromkeys(refs))
