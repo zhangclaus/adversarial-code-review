@@ -473,3 +473,33 @@ async def test_max_workers_limits_concurrency(tmp_path: Path) -> None:
     )
 
     assert max_concurrency <= 2, f"Expected max 2 concurrent workers, got {max_concurrency}"
+
+
+@pytest.mark.asyncio
+async def test_worker_cleanup_on_turn_failure(tmp_path: Path) -> None:
+    """Workers should be stopped when turns fail."""
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/a.py"], "worker_id": "worker-source-task-1"},
+    }
+    controller = _make_controller(changes_map=changes_map)
+    # Source turn fails
+    supervisor = _make_supervisor(turn_results=[
+        {"status": "turn_failed", "turn_id": "t1", "reason": "worker crashed"},
+    ])
+    event_store = _make_event_store()
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    subtasks = [_make_subtask("task-1")]
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=subtasks,
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    assert result["status"] == "max_rounds_exhausted"
+    # Controller should have been asked to release the worker
+    controller.release_worker.assert_called()

@@ -235,21 +235,26 @@ class ParallelSupervisor:
         turn_id = f"{round_id}-{subtask.worker_id}-source"
         marker = f"<<<CODEX_TURN_DONE crew={crew_id} worker={subtask.worker_id} phase=source>>>"
 
-        turn_result = await self._supervisor.async_run_worker_turn(
-            crew_id=crew_id,
-            goal=goal,
-            worker_id=subtask.worker_id,
-            round_id=round_id,
-            phase="source",
-            contract_id=worker_info.get("contract_id", ""),
-            message=f"Complete subtask: {subtask.description}",
-            expected_marker=marker,
-            cancel_event=cancel_event,
-        )
+        try:
+            turn_result = await self._supervisor.async_run_worker_turn(
+                crew_id=crew_id,
+                goal=goal,
+                worker_id=subtask.worker_id,
+                round_id=round_id,
+                phase="source",
+                contract_id=worker_info.get("contract_id", ""),
+                message=f"Complete subtask: {subtask.description}",
+                expected_marker=marker,
+                cancel_event=cancel_event,
+            )
+        except Exception:
+            self._release_worker(subtask.worker_id, crew_id)
+            raise
 
         if turn_result.get("status") != "turn_completed":
             subtask.status = "failed"
             subtask.result = turn_result
+            self._release_worker(subtask.worker_id, crew_id)
             return {
                 "task_id": subtask.task_id,
                 "unit_review": "fail",
@@ -266,6 +271,8 @@ class ParallelSupervisor:
             repo_root=repo_root,
             cancel_event=cancel_event,
         )
+
+        self._release_worker(subtask.worker_id, crew_id)
 
         if review_result["verdict"] == "pass":
             subtask.status = "passed"
@@ -321,17 +328,21 @@ class ParallelSupervisor:
             "If the changes look correct, write OK in your summary."
         )
 
-        review_result = await self._supervisor.async_run_worker_turn(
-            crew_id=crew_id,
-            goal=goal,
-            worker_id=reviewer_id,
-            round_id=round_id,
-            phase="unit_review",
-            contract_id=reviewer_info.get("contract_id", ""),
-            message=review_message,
-            expected_marker=review_marker,
-            cancel_event=cancel_event,
-        )
+        try:
+            review_result = await self._supervisor.async_run_worker_turn(
+                crew_id=crew_id,
+                goal=goal,
+                worker_id=reviewer_id,
+                round_id=round_id,
+                phase="unit_review",
+                contract_id=reviewer_info.get("contract_id", ""),
+                message=review_message,
+                expected_marker=review_marker,
+                cancel_event=cancel_event,
+            )
+        except Exception:
+            self._release_worker(reviewer_id, crew_id)
+            raise
 
         # Parse verdict from events — use the actual turn_id from the result,
         # falling back to the worker_id-based format (not task_id) to match
@@ -347,6 +358,8 @@ class ParallelSupervisor:
                 verdict = "block"
                 reason = summary
                 break
+
+        self._release_worker(reviewer_id, crew_id)
 
         return {"verdict": verdict, "reason": reason}
 
@@ -454,3 +467,10 @@ class ParallelSupervisor:
             crew_id=crew_id,
             contract=contract,
         )
+
+    def _release_worker(self, worker_id: str, crew_id: str) -> None:
+        """Best-effort worker cleanup."""
+        try:
+            self._controller.release_worker(crew_id, worker_id)
+        except Exception:
+            pass  # cleanup must not crash the supervision loop
