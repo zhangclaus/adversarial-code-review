@@ -348,6 +348,51 @@ async def test_verification_failure_challenges_and_retries(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_unit_review_block_verdict_detected(tmp_path: Path) -> None:
+    """Unit review must detect BLOCK verdict from event store using the correct turn_id.
+
+    The bug: when async_run_worker_turn does NOT return a turn_id, the fallback
+    constructs it from task_id, but events are stored keyed by worker_id.
+    This causes the event store query to return empty, defaulting verdict to pass.
+    """
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/a.py"], "worker_id": "worker-source-task-1"},
+    }
+    controller = _make_controller(changes_map=changes_map)
+
+    # async_run_worker_turn does NOT return turn_id in the review result,
+    # forcing the fallback path in _run_unit_review
+    supervisor = _make_supervisor(turn_results=[
+        {"status": "turn_completed", "turn_id": "source-turn-1"},
+        {"status": "turn_completed"},  # no turn_id — triggers fallback
+    ])
+
+    # Event store keyed by the worker_id-based turn_id (the correct key)
+    # The fallback would use task_id-based key which won't match
+    event_store = _make_event_store(events_by_turn={
+        "parallel-round-1-worker-review-task-1-unit_review": [
+            {"type": "worker.outbox.detected", "payload": {"summary": "BLOCK: critical security issue"}, "worker_id": "worker-review-task-1"},
+        ],
+    })
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    subtasks = [_make_subtask("task-1")]
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=subtasks,
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    # Must NOT be ready — BLOCK should have been detected
+    assert result["status"] == "max_rounds_exhausted"
+    assert subtasks[0].status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_progress_callback_invoked(tmp_path: Path) -> None:
     """Progress callback should be called with watching and integration phases."""
     changes_map = {

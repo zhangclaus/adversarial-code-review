@@ -305,7 +305,6 @@ class ParallelSupervisor:
             repo_root=repo_root,
         )
         reviewer_id = reviewer_info["worker_id"]
-        review_turn_id = f"{round_id}-{subtask.task_id}-unit-review"
         review_marker = f"<<<CODEX_TURN_DONE crew={crew_id} worker={reviewer_id} phase=unit_review>>>"
 
         changed_files = ", ".join(changes.get("changed_files", []))
@@ -329,8 +328,10 @@ class ParallelSupervisor:
             cancel_event=cancel_event,
         )
 
-        # Parse verdict from events
-        turn_id = review_result.get("turn_id", review_turn_id)
+        # Parse verdict from events — use the actual turn_id from the result,
+        # falling back to the worker_id-based format (not task_id) to match
+        # how async_run_worker_turn stores events.
+        turn_id = review_result.get("turn_id", f"{round_id}-{reviewer_id}-unit_review")
         events = self._event_store.list_by_turn(turn_id)
 
         verdict = "pass"
