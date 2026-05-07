@@ -36,6 +36,17 @@ class FakeRunner:
             cancel_event=cancel_event,
         )
 
+    async def async_supervise(self, *, repo_root, crew_id, goal, subtasks, verification_commands, max_rounds=3, max_workers=3, progress_callback=None, cancel_event=None):
+        for phase, round_idx in self._progress_phases:
+            if progress_callback:
+                progress_callback(phase, round_idx, max_rounds)
+            time.sleep(0.01)
+        if self._delay:
+            time.sleep(self._delay)
+        if self._error:
+            raise RuntimeError(self._error)
+        return self._result
+
 
 def test_job_initial_state():
     job = Job(job_id="test-1")
@@ -467,3 +478,26 @@ def test_mark_job_reported(tmp_path):
         manager.mark_job_reported(job_id)
         snap2 = manager.get_job_status(job_id)
         assert snap2["has_changed"] is False
+
+
+def test_job_manager_create_parallel_job(tmp_path):
+    """create_job with parallel=True should use async_supervise."""
+    manager = JobManager()
+    runner = FakeRunner(progress_phases=[("watching", 1)])
+
+    job_id = manager.create_job(
+        runner=runner,
+        repo_root=tmp_path,
+        goal="implement feature",
+        verification_commands=["echo ok"],
+        max_rounds=1,
+        parallel=True,
+        max_workers=2,
+    )
+
+    assert job_id.startswith("job-")
+
+    time.sleep(0.3)
+    job = manager.get_job(job_id)
+    assert job.status == "done"
+    assert job.result is not None

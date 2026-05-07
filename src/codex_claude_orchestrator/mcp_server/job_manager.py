@@ -73,6 +73,8 @@ class JobManager:
         crew_id: str = "",
         verification_commands: list[str] | None = None,
         max_rounds: int = 3,
+        parallel: bool = False,
+        max_workers: int = 3,
     ) -> str:
         """Create a job, start background thread, return job_id."""
         job_id = f"job-{uuid.uuid4().hex[:8]}"
@@ -83,7 +85,23 @@ class JobManager:
 
         def _run() -> None:
             try:
-                if crew_id:
+                if parallel:
+                    import asyncio
+                    subtasks = _split_goal_into_subtasks(goal)
+                    result = asyncio.run(runner.async_supervise(
+                        repo_root=repo_root,
+                        crew_id=crew_id or f"crew-{job_id}",
+                        goal=goal,
+                        subtasks=subtasks,
+                        verification_commands=verification_commands or ["echo ok"],
+                        max_rounds=max_rounds,
+                        max_workers=max_workers,
+                        progress_callback=lambda phase, round_idx, _max: self._on_progress(
+                            job_id, phase, round_idx
+                        ),
+                        cancel_event=job.cancel_event,
+                    ))
+                elif crew_id:
                     result = runner.supervise(
                         repo_root=repo_root,
                         crew_id=crew_id,
@@ -224,3 +242,15 @@ class JobManager:
         ]
         for jid in stale:
             del self._jobs[jid]
+
+
+def _split_goal_into_subtasks(goal: str) -> list:
+    """Simple default task splitting. Returns a single subtask for the whole goal."""
+    from codex_claude_orchestrator.v4.subtask import SubTask
+    return [
+        SubTask(
+            task_id="st-1",
+            description=goal,
+            scope=["src/", "tests/"],
+        )
+    ]
