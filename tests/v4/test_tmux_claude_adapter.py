@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 from codex_claude_orchestrator.v4.adapters.tmux_claude import ClaudeCodeTmuxAdapter
@@ -716,12 +717,16 @@ def test_watch_turn_backoff_increases_delay(monkeypatch):
     class _AbortPolling(Exception):
         """Sentinel raised to break out of the poll loop."""
 
-    sleep_calls = []
-    def track_sleep(d):
-        sleep_calls.append(d)
-        if len(sleep_calls) >= 4:
+    wait_calls = []
+    original_wait = threading.Event.wait
+
+    def track_wait(self_event, timeout):
+        wait_calls.append(timeout)
+        if len(wait_calls) >= 4:
             raise _AbortPolling()
-    monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", track_sleep)
+        return False  # event not set
+
+    monkeypatch.setattr(threading.Event, "wait", track_wait)
 
     turn = TurnEnvelope(
         crew_id="crew-1", worker_id="worker-1", turn_id="turn-1",
@@ -733,10 +738,10 @@ def test_watch_turn_backoff_increases_delay(monkeypatch):
     except _AbortPolling:
         pass
 
-    assert sleep_calls[0] == 1.0
-    assert sleep_calls[1] == 2.0
-    assert sleep_calls[2] == 4.0
-    assert sleep_calls[3] == 5.0  # capped at poll_max_delay
+    assert wait_calls[0] == 1.0
+    assert wait_calls[1] == 2.0
+    assert wait_calls[2] == 4.0
+    assert wait_calls[3] == 5.0  # capped at poll_max_delay
 
 
 def test_watch_turn_observe_failed_returns_immediately(monkeypatch):
@@ -866,3 +871,119 @@ def test_watch_turn_marker_found_during_retry(monkeypatch):
     assert types.count("runtime.poll_retry") == 1
     assert types[-1] == "marker.detected"
     assert events[-1].payload["marker"] == "marker-1"
+
+
+def test_tmux_adapter_cancel_event_stops_polling(monkeypatch):
+    cancel = threading.Event()
+    native = FakeNativeSession()
+    native.observe_result = {
+        "snapshot": "working",
+        "marker": "marker-1",
+        "marker_seen": False,
+        "transcript_artifact": "",
+    }
+    adapter = ClaudeCodeTmuxAdapter(
+        native_session=native,
+        poll_initial_delay=10.0,
+        poll_timeout=300.0,
+        cancel_event=cancel,
+    )
+
+    # Set cancel event immediately so wait() returns True
+    cancel.set()
+    turn = TurnEnvelope(
+        crew_id="crew-1", worker_id="worker-1", turn_id="turn-1",
+        round_id="round-1", phase="source", message="go", expected_marker="marker-1",
+    )
+
+    events = list(adapter.watch_turn(turn))
+    types = [e.type for e in events]
+
+    assert "runtime.cancelled" in types
+    cancel_event = [e for e in events if e.type == "runtime.cancelled"][0]
+    assert cancel_event.payload["reason"] == "cancelled"
+    assert cancel_event.turn_id == "turn-1"
+    assert cancel_event.worker_id == "worker-1"
+
+
+def tmux_adapter_cancel_event_does_not_fire_when_not_set(monkeypatch):
+    cancel = threading.Event()
+    native = FakeNativeSession()
+    native.observe_result = {
+        "snapshot": "done\nmarker-1",
+        "marker": "marker-1",
+        "marker_seen": True,
+        "transcript_artifact": "",
+    }
+    adapter = ClaudeCodeTmuxAdapter(
+        native_session=native,
+        poll_initial_delay=0.01,
+        cancel_event=cancel,
+    )
+    monkeypatch.setattr("codex_claude_orchestrator.v4.adapters.tmux_claude.time.sleep", lambda _: None)
+    turn = TurnEnvelope(
+        crew_id="crew-1", worker_id="worker-1", turn_id="turn-1",
+        round_id="round-1", phase="source", message="go", expected_marker="marker-1",
+    )
+
+    events = list(adapter.watch_turn(turn))
+    types = [e.type for e in events]
+
+    assert "runtime.cancelled" not in types
+    assert types[-1] == "marker.detected"
+
+
+def test_tmux_adapter_default_cancel_event_is_unset():
+    native = FakeNativeSession()
+    adapter = ClaudeCodeTmuxAdapter(native_session=native)
+    assert isinstance(adapter._cancel, threading.Event)
+    assert not adapter._cancel.is_set()
+
+
+def test_watch_filesystem_stream_respects_cancel(tmp_path: Path):
+    """_watch_filesystem_stream should check cancel_event and return immediately."""
+    outbox_path = tmp_path / "workers" / "worker-1" / "outbox" / "turn-1.json"
+    outbox_path.parent.mkdir(parents=True)
+    outbox_path.write_text(
+        json.dumps(
+            {
+                "crew_id": "crew-1",
+                "worker_id": "worker-1",
+                "turn_id": "turn-1",
+                "status": "completed",
+                "summary": "implemented",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cancel = threading.Event()
+    cancel.set()  # Pre-cancel
+    native = FakeNativeSession()
+    native.observe_result = {
+        "snapshot": "",
+        "marker": "marker-1",
+        "marker_seen": False,
+        "transcript_artifact": "",
+    }
+    adapter = ClaudeCodeTmuxAdapter(
+        native_session=native,
+        cancel_event=cancel,
+    )
+    turn = TurnEnvelope(
+        crew_id="crew-1",
+        worker_id="worker-1",
+        turn_id="turn-1",
+        round_id="round-1",
+        phase="source",
+        message="Implement",
+        expected_marker="marker-1",
+        required_outbox_path=str(outbox_path),
+    )
+
+    events = list(adapter.watch_turn(turn))
+    types = [e.type for e in events]
+
+    # _watch_filesystem_stream should have returned without yielding outbox events
+    assert "worker.outbox.detected" not in types
+    # The cancel event should still be emitted from the polling loop
+    assert "runtime.cancelled" in types

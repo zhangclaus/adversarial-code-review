@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -33,6 +34,7 @@ class ClaudeCodeTmuxAdapter:
         poll_max_delay: float = 10.0,
         poll_timeout: float = 1800.0,
         poll_retries: int = 3,
+        cancel_event: threading.Event | None = None,
     ):
         self._native_session = native_session
         self._workers: dict[str, WorkerSpec] = {}
@@ -40,6 +42,7 @@ class ClaudeCodeTmuxAdapter:
         self._poll_max_delay = poll_max_delay
         self._poll_timeout = poll_timeout
         self._poll_retries = poll_retries
+        self._cancel = cancel_event or threading.Event()
 
     def register_worker(self, spec: WorkerSpec) -> WorkerHandle:
         self._workers[spec.worker_id] = spec
@@ -75,10 +78,11 @@ class ClaudeCodeTmuxAdapter:
             reason=reason or "sent to tmux pane",
         )
 
-    def watch_turn(self, turn: TurnEnvelope):
+    def watch_turn(self, turn: TurnEnvelope, cancel_event: threading.Event | None = None):
         worker = self._workers.get(turn.worker_id)
         terminal_pane = _terminal_pane_for(turn, worker)
-        yield from self._watch_filesystem_stream(turn, worker)
+        cancel = cancel_event or self._cancel
+        yield from self._watch_filesystem_stream(turn, worker, cancel_event=cancel)
 
         max_attempts = 1 + self._poll_retries
         last_text = ""
@@ -166,11 +170,21 @@ class ClaudeCodeTmuxAdapter:
                     )
                     return
 
-                # Backoff sleep
-                time.sleep(delay)
+                # Backoff sleep (cancellable)
+                if cancel.wait(delay):
+                    yield RuntimeEvent(
+                        type="runtime.cancelled",
+                        turn_id=turn.turn_id,
+                        worker_id=turn.worker_id,
+                        payload={"reason": "cancelled"},
+                    )
+                    return
                 delay = min(delay * 2, self._poll_max_delay)
 
-    def _watch_filesystem_stream(self, turn: TurnEnvelope, worker: WorkerSpec | None):
+    def _watch_filesystem_stream(self, turn: TurnEnvelope, worker: WorkerSpec | None, cancel_event: threading.Event | None = None):
+        cancel = cancel_event or self._cancel
+        if cancel.is_set():
+            return
         outbox_path = _required_outbox_path(turn)
         transcript_path = _transcript_path(worker)
         if outbox_path is None and transcript_path is None:
