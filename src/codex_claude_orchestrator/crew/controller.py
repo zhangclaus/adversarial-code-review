@@ -494,6 +494,16 @@ class CrewController:
                 round_id=round_id, contract_id=contract_id, artifact_refs=artifact_refs,
             )
         self._mark_task_status(crew_id, task_id, CrewTaskStatus.CHALLENGED)
+        self._blackboard.append(BlackboardEntry(
+            entry_id=self._entry_id_factory(),
+            crew_id=crew_id,
+            task_id=task_id or "",
+            actor_type=ActorType.SUPERVISOR,
+            actor_id="supervisor",
+            type=BlackboardEntryType.RISK,
+            content=summary,
+            confidence=0.9,
+        ))
         return {"crew_id": crew_id, "summary": summary, "task_id": task_id}
 
     def accept(self, *, crew_id: str, summary: str) -> dict:

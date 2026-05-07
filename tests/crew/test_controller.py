@@ -5,7 +5,9 @@ from codex_claude_orchestrator.crew.controller import CrewController
 import pytest
 
 from codex_claude_orchestrator.crew.models import (
+    ActorType,
     AuthorityLevel,
+    BlackboardEntry,
     BlackboardEntryType,
     CrewRecord,
     CrewStatus,
@@ -792,3 +794,31 @@ def test_accept_returns_success_even_if_stop_crew_fails(tmp_path: Path):
     assert result["status"] == "accepted"
     assert "error" in result["stop"]
     assert "tmux session is gone" in result["stop"]["error"]
+
+
+def test_challenge_writes_blackboard_entry(tmp_path: Path):
+    """challenge() should write a RISK entry to blackboard."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    recorder = CrewRecorder(repo_root / ".orchestrator")
+    controller = CrewController(
+        recorder=recorder,
+        blackboard=BlackboardStore(recorder),
+        task_graph=TaskGraphPlanner(),
+        worker_pool=FakeWorkerPool(),
+        crew_id_factory=lambda: "crew-1",
+        entry_id_factory=lambda: "entry-challenge",
+    )
+    crew = controller.start_dynamic(repo_root=repo_root, goal="Test challenge blackboard")
+
+    controller.challenge(crew_id=crew.crew_id, summary="risky code", task_id="t1")
+
+    details = recorder.read_crew(crew.crew_id)
+    challenge_entry = details["blackboard"][-1]
+    assert challenge_entry["type"] == "risk"
+    assert challenge_entry["content"] == "risky code"
+    assert challenge_entry["crew_id"] == "crew-1"
+    assert challenge_entry["task_id"] == "t1"
+    assert challenge_entry["actor_type"] == "supervisor"
+    assert challenge_entry["actor_id"] == "supervisor"
+    assert challenge_entry["confidence"] == 0.9

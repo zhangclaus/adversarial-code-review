@@ -73,6 +73,7 @@ class BlackboardEntryType(StrEnum):
 class ActorType(StrEnum):
     CODEX = "codex"
     WORKER = "worker"
+    SUPERVISOR = "supervisor"
 
 
 class AuthorityLevel(StrEnum):
