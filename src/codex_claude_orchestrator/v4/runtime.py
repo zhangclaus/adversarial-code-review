@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Protocol
+from typing import Any, AsyncIterable, Iterable, Protocol
 
 from codex_claude_orchestrator.v4.events import normalize
 
@@ -97,7 +98,27 @@ class RuntimeAdapter(Protocol):
     def deliver_turn(self, turn: TurnEnvelope) -> DeliveryResult:
         ...
 
-    def watch_turn(self, turn: TurnEnvelope) -> Iterable[RuntimeEvent]:
+    def watch_turn(self, turn: TurnEnvelope, cancel_event: threading.Event | None = None) -> Iterable[RuntimeEvent]:
+        ...
+
+    def collect_artifacts(self, turn: TurnEnvelope) -> list[str]:
+        ...
+
+    def cancel_turn(self, turn: TurnEnvelope) -> CancellationResult:
+        ...
+
+    def stop_worker(self, worker_id: str) -> StopResult:
+        ...
+
+
+class AsyncRuntimeAdapter(Protocol):
+    def spawn_worker(self, spec: WorkerSpec) -> WorkerHandle:
+        ...
+
+    def deliver_turn(self, turn: TurnEnvelope) -> DeliveryResult:
+        ...
+
+    def async_watch_turn(self, turn: TurnEnvelope, cancel_event: threading.Event | None = None) -> AsyncIterable[RuntimeEvent]:
         ...
 
     def collect_artifacts(self, turn: TurnEnvelope) -> list[str]:

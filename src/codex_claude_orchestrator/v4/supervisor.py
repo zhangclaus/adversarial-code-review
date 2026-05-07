@@ -184,6 +184,118 @@ class V4Supervisor:
             "reason": decision.reason,
         }
 
+    async def async_run_worker_turn(
+        self,
+        *,
+        crew_id: str,
+        goal: str,
+        worker_id: str,
+        round_id: str,
+        phase: str,
+        contract_id: str,
+        message: str,
+        expected_marker: str,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, str]:
+        self._workflow.start_crew(crew_id=crew_id, goal=goal)
+        context = self._build_turn_context(crew_id=crew_id, worker_id=worker_id)
+        turn_id = f"{round_id}-{worker_id}-{phase}"
+        required_outbox_path = self._prepare_required_outbox_path(
+            crew_id=crew_id,
+            worker_id=worker_id,
+            turn_id=turn_id,
+        )
+        turn = TurnEnvelope(
+            crew_id=crew_id,
+            worker_id=worker_id,
+            turn_id=turn_id,
+            round_id=round_id,
+            phase=phase,
+            message=message,
+            expected_marker=expected_marker,
+            required_outbox_path=required_outbox_path,
+            contract_id=contract_id,
+            unread_inbox_digest=context.get("unread_inbox_digest", ""),
+            unread_message_ids=context.get("unread_message_ids", []),
+            open_protocol_requests=context.get("open_protocol_requests", []),
+            open_protocol_requests_digest=context.get("open_protocol_requests_digest", ""),
+        )
+
+        terminal_result = self._terminal_result(crew_id=crew_id, turn=turn)
+        if terminal_result is not None:
+            return terminal_result
+
+        delivery_result = self._turns.request_and_deliver(turn)
+        terminal_result = self._terminal_result(crew_id=crew_id, turn=turn)
+        if terminal_result is not None:
+            return terminal_result
+
+        if not delivery_result.delivered:
+            status = (
+                "waiting"
+                if delivery_result.reason == "delivery already in progress"
+                else "delivery_failed"
+            )
+            return {
+                "crew_id": crew_id,
+                "status": status,
+                "turn_id": turn.turn_id,
+                "reason": delivery_result.reason,
+            }
+
+        runtime_events = []
+        index = 0
+        async for runtime_event in self._adapter.async_watch_turn(turn, cancel_event=cancel_event):
+            if not self._is_current_turn_event(turn, runtime_event):
+                continue
+            event_payload = _runtime_event_payload_for_storage(runtime_event)
+            event = self._events.append(
+                stream_id=crew_id,
+                type=runtime_event.type,
+                crew_id=crew_id,
+                worker_id=runtime_event.worker_id,
+                turn_id=runtime_event.turn_id,
+                round_id=turn.round_id,
+                contract_id=turn.contract_id,
+                idempotency_key=(
+                    f"{crew_id}/{turn.turn_id}/{runtime_event.type}/{index}/"
+                    f"{_runtime_event_digest(runtime_event, index=index)}"
+                ),
+                payload=event_payload,
+                artifact_refs=runtime_event.artifact_refs,
+            )
+            self._process_message_ack_if_configured(event)
+            runtime_events.append(runtime_event)
+            index += 1
+        self._commit_runtime_events_if_supported(turn, runtime_events)
+
+        terminal_result = self._terminal_result(crew_id=crew_id, turn=turn)
+        if terminal_result is not None:
+            return terminal_result
+
+        decision = self._completion.evaluate(turn, runtime_events)
+        terminal_event = self._events.append(
+            stream_id=crew_id,
+            type=decision.event_type,
+            crew_id=crew_id,
+            worker_id=worker_id,
+            turn_id=turn.turn_id,
+            round_id=turn.round_id,
+            contract_id=turn.contract_id,
+            idempotency_key=f"{crew_id}/{turn.turn_id}/{decision.event_type}",
+            payload={"reason": decision.reason},
+            artifact_refs=decision.evidence_refs,
+        )
+        self._evaluate_completed_turn_if_configured(terminal_event)
+        if decision.event_type == "turn.completed":
+            return {"crew_id": crew_id, "status": "turn_completed", "turn_id": turn.turn_id}
+        return {
+            "crew_id": crew_id,
+            "status": "waiting",
+            "turn_id": turn.turn_id,
+            "reason": decision.reason,
+        }
+
     @staticmethod
     def _is_current_turn_event(turn: TurnEnvelope, event: RuntimeEvent) -> bool:
         return event.turn_id == turn.turn_id and event.worker_id == turn.worker_id

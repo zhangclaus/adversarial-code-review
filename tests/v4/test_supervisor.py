@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -109,6 +110,47 @@ class FakeNativeSession:
 
     def observe(self, **kwargs):
         return self.observe_result
+
+
+class FakeArtifactStore:
+    def __init__(self, root: Path):
+        self.root = root
+
+
+class FakeAsyncAdapter:
+    def __init__(self, events=None, delivery_result=None):
+        self.events = events or []
+        self.delivery_result = delivery_result
+        self.delivered = []
+        self.delivered_turns = []
+        self.watched = []
+
+    def spawn_worker(self, spec):
+        return None
+
+    def deliver_turn(self, turn: TurnEnvelope):
+        self.delivered.append(turn.turn_id)
+        self.delivered_turns.append(turn)
+        if self.delivery_result is not None:
+            return self.delivery_result
+        return DeliveryResult(delivered=True, marker=turn.expected_marker, reason="sent")
+
+    async def async_watch_turn(self, turn: TurnEnvelope, cancel_event=None):
+        self.watched.append(turn.turn_id)
+        events = self.events(turn) if callable(self.events) else self.events
+        for event in events:
+            yield event
+
+    def collect_artifacts(self, turn: TurnEnvelope):
+        return []
+
+    def cancel_turn(self, turn: TurnEnvelope):
+        from codex_claude_orchestrator.v4.runtime import CancellationResult
+        return CancellationResult(cancelled=False, reason="not implemented")
+
+    def stop_worker(self, worker_id: str):
+        from codex_claude_orchestrator.v4.runtime import StopResult
+        return StopResult(stopped=False, reason="not implemented")
 
 
 def test_v4_supervisor_runs_until_turn_completed(tmp_path: Path):
@@ -885,3 +927,35 @@ def test_v4_supervisor_streams_events_to_store_during_iteration(tmp_path: Path):
     )
 
     assert result["status"] == "turn_completed"
+
+
+@pytest.mark.asyncio
+async def test_async_run_worker_turn_completes_turn(tmp_path: Path):
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    adapter = FakeAsyncAdapter(
+        lambda turn: [completed_outbox_event(turn)]
+    )
+    supervisor = V4Supervisor(
+        event_store=store,
+        artifact_store=FakeArtifactStore(tmp_path / "artifacts"),
+        adapter=adapter,
+    )
+    result = await supervisor.async_run_worker_turn(
+        crew_id="crew-1",
+        goal="test",
+        worker_id="worker-1",
+        round_id="round-1",
+        phase="source",
+        contract_id="source_write",
+        message="do work",
+        expected_marker="marker-1",
+    )
+    assert result["status"] == "turn_completed"
+    assert [event.type for event in store.list_stream("crew-1")] == [
+        "crew.started",
+        "turn.requested",
+        "turn.delivery_started",
+        "turn.delivered",
+        "worker.outbox.detected",
+        "turn.completed",
+    ]
