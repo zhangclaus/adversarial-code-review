@@ -31,7 +31,7 @@ class FakeAdapter:
             return self.delivery_result
         return DeliveryResult(delivered=True, marker=turn.expected_marker, reason="sent")
 
-    def watch_turn(self, turn: TurnEnvelope):
+    def watch_turn(self, turn: TurnEnvelope, cancel_event=None):
         self.watched.append(turn.turn_id)
         events = self.events(turn) if callable(self.events) else self.events
         return iter(events)
@@ -841,3 +841,47 @@ def test_v4_supervisor_ignores_mismatched_runtime_events(tmp_path: Path):
         "turn.delivered",
         "turn.inconclusive",
     ]
+
+
+def test_v4_supervisor_streams_events_to_store_during_iteration(tmp_path: Path):
+    """Events must be appended to the store as they are yielded from the adapter,
+    not buffered first via list comprehension.  This ensures that a crash
+    mid-iteration loses at most the current event, not all of them."""
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+
+    def events_for_turn(turn: TurnEnvelope):
+        yield RuntimeEvent(
+            type="output.chunk",
+            turn_id=turn.turn_id,
+            worker_id=turn.worker_id,
+            payload={"text": "first"},
+        )
+        # After the first event is yielded, it should already be persisted
+        stored_types = [e.type for e in store.list_stream("crew-1")]
+        assert "output.chunk" in stored_types, (
+            "First event should be persisted before second event is yielded"
+        )
+        yield RuntimeEvent(
+            type="worker.outbox.detected",
+            turn_id=turn.turn_id,
+            worker_id=turn.worker_id,
+            payload={"valid": True, "status": "completed"},
+            artifact_refs=[f"workers/{turn.worker_id}/outbox/{turn.turn_id}.json"],
+        )
+
+    supervisor = V4Supervisor(
+        event_store=store,
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+        adapter=FakeAdapter(events_for_turn),
+    )
+
+    result = supervisor.run_source_turn(
+        crew_id="crew-1",
+        goal="Fix tests",
+        worker_id="worker-1",
+        round_id="round-1",
+        message="Implement",
+        expected_marker="marker-1",
+    )
+
+    assert result["status"] == "turn_completed"

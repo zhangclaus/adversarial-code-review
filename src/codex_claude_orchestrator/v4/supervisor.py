@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ class V4Supervisor:
         round_id: str,
         message: str,
         expected_marker: str,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, str]:
         return self.run_worker_turn(
             crew_id=crew_id,
@@ -68,6 +70,7 @@ class V4Supervisor:
             contract_id="source_write",
             message=message,
             expected_marker=expected_marker,
+            cancel_event=cancel_event,
         )
 
     def run_worker_turn(
@@ -81,6 +84,7 @@ class V4Supervisor:
         contract_id: str,
         message: str,
         expected_marker: str,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, str]:
         self._workflow.start_crew(crew_id=crew_id, goal=goal)
         context = self._build_turn_context(crew_id=crew_id, worker_id=worker_id)
@@ -128,12 +132,11 @@ class V4Supervisor:
                 "reason": delivery_result.reason,
             }
 
-        runtime_events = [
-            runtime_event
-            for runtime_event in self._adapter.watch_turn(turn)
-            if self._is_current_turn_event(turn, runtime_event)
-        ]
-        for index, runtime_event in enumerate(runtime_events):
+        runtime_events = []
+        for index, runtime_event in enumerate(
+            e for e in self._adapter.watch_turn(turn, cancel_event=cancel_event)
+            if self._is_current_turn_event(turn, e)
+        ):
             event_payload = _runtime_event_payload_for_storage(runtime_event)
             event = self._events.append(
                 stream_id=crew_id,
@@ -151,6 +154,7 @@ class V4Supervisor:
                 artifact_refs=runtime_event.artifact_refs,
             )
             self._process_message_ack_if_configured(event)
+            runtime_events.append(runtime_event)
         self._commit_runtime_events_if_supported(turn, runtime_events)
 
         terminal_result = self._terminal_result(crew_id=crew_id, turn=turn)
