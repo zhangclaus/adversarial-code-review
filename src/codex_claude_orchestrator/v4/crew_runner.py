@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,6 @@ from codex_claude_orchestrator.crew.scope import scope_covers_all as _scope_cove
 from codex_claude_orchestrator.crew.review_verdict import ReviewVerdict, ReviewVerdictParser
 from codex_claude_orchestrator.v4.event_store_protocol import EventStore
 from codex_claude_orchestrator.v4.events import AgentEvent
-from codex_claude_orchestrator.v4.learning_feedback import GovernedLearningFeedback
 from codex_claude_orchestrator.v4.learning_projection import LearningProjection
 from codex_claude_orchestrator.v4.merge_inputs import V4MergeInputRecorder
 from codex_claude_orchestrator.v4.paths import V4Paths
@@ -39,6 +40,7 @@ class V4CrewRunner:
         self._controller = controller
         self._supervisor = supervisor
         self._events = event_store
+        self.adapter = getattr(supervisor, '_adapter', None)
         self._workflow = V4WorkflowEngine(event_store=event_store)
         self._decision_policy = decision_policy or CrewDecisionPolicy()
         self._planner_policy = planner_policy or PlannerPolicy()
@@ -58,6 +60,8 @@ class V4CrewRunner:
         allow_dirty_base: bool = False,
         spawn_policy: str = "dynamic",
         seed_contract: str | None = None,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         if spawn_policy == "dynamic":
             crew = self._controller.start_dynamic(repo_root=repo_root, goal=goal)
@@ -70,6 +74,8 @@ class V4CrewRunner:
                 dynamic=True,
                 allow_dirty_base=allow_dirty_base,
                 seed_contract=seed_contract,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
             )
 
         selected_roles = worker_roles or WorkerSelectionPolicy().select(goal=goal).roles
@@ -86,6 +92,8 @@ class V4CrewRunner:
             max_rounds=max_rounds,
             poll_interval_seconds=poll_interval_seconds,
             dynamic=False,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
         )
 
     def supervise(
@@ -99,24 +107,38 @@ class V4CrewRunner:
         dynamic: bool = False,
         allow_dirty_base: bool = False,
         seed_contract: str | None = None,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         if not verification_commands:
             raise ValueError("at least one verification command is required")
+
+        def _progress(phase: str, round_index: int) -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(phase, round_index, max_rounds)
+                except Exception:
+                    pass  # progress callback failure must not crash the supervise loop
 
         events: list[dict[str, Any]] = []
         verification_failures: list[dict[str, Any]] = []
         repair_requests: list[str] = []
         paths = V4Paths(repo_root=repo_root, crew_id=crew_id)
-        learning_feedback = GovernedLearningFeedback(
-            event_store=self._events,
-            paths=paths,
-        )
         merge_input_recorder = V4MergeInputRecorder(
             event_store=self._events,
             paths=paths,
         )
 
         for round_index in range(1, max_rounds + 1):
+            if cancel_event and cancel_event.is_set():
+                return {
+                    "crew_id": crew_id,
+                    "status": "cancelled",
+                    "runtime": "v4",
+                    "rounds": round_index - 1,
+                    "events": events,
+                }
+            _progress("spawning", round_index)
             details = self._controller.status(repo_root=repo_root, crew_id=crew_id)
             goal = details.get("crew", {}).get("root_goal", "")
             repo_report = self._repo_intelligence.analyze(repo_root=repo_root, goal=goal)
@@ -155,6 +177,7 @@ class V4CrewRunner:
             marker = self._turn_marker(crew_id, source_worker["worker_id"], "source", round_index)
             source_worker_id = source_worker["worker_id"]
             self._controller.claim_worker(crew_id, source_worker_id)
+            _progress("polling", round_index)
             try:
                 turn_result = self._supervisor.run_source_turn(
                     crew_id=crew_id,
@@ -167,6 +190,7 @@ class V4CrewRunner:
                         repair_requests=repair_requests,
                     ),
                     expected_marker=marker,
+                    cancel_event=cancel_event,
                 )
             finally:
                 self._controller.release_worker(crew_id, source_worker_id)
@@ -236,22 +260,22 @@ class V4CrewRunner:
                 }
             if scope_result.status == "challenge":
                 summary = self._scope_challenge_message(scope_result)
-                self._controller.challenge(crew_id=crew_id, summary=summary)
-                self._append_challenge_and_repair_events(
+                self._controller.challenge(
                     crew_id=crew_id,
-                    worker=source_worker,
-                    round_id=round_id,
                     summary=summary,
+                    worker_id=source_worker["worker_id"],
                     category="write_scope",
                     source_event_ids=[],
+                    round_id=round_id,
+                    contract_id=source_worker.get("contract_id", ""),
                     artifact_refs=scope_result.evidence_refs or merge_evidence_refs,
-                    learning_feedback=learning_feedback,
                 )
                 repair_requests.append(summary)
                 events.append({"action": "challenge", "round": round_index, "summary": summary})
                 continue
 
             if changes.get("changed_files"):
+                _progress("reviewing", round_index)
                 change_report = self._repo_intelligence.analyze(
                     repo_root=repo_root,
                     goal=goal,
@@ -269,12 +293,13 @@ class V4CrewRunner:
                     repo_report=change_report.to_dict(),
                     learning_projection=learning_projection,
                     allow_dirty_base=allow_dirty_base,
+                    cancel_event=cancel_event,
                 )
                 events.extend(review_result["events"])
-                if review_result["status"] == "waiting_for_worker":
+                if review_result["status"] in ("waiting_for_worker", "review_failed", "review_timeout", "review_cancelled"):
                     return {
                         "crew_id": crew_id,
-                        "status": "waiting_for_worker",
+                        "status": review_result["status"],
                         "runtime": "v4",
                         "worker_id": review_result["worker_id"],
                         "reason": review_result["reason"],
@@ -292,22 +317,22 @@ class V4CrewRunner:
                 review_verdict = review_result["verdict"]
                 if review_verdict.status == "block":
                     summary = self._review_challenge_message(review_verdict)
-                    self._controller.challenge(crew_id=crew_id, summary=summary)
-                    self._append_challenge_and_repair_events(
+                    self._controller.challenge(
                         crew_id=crew_id,
-                        worker=source_worker,
-                        round_id=round_id,
                         summary=summary,
+                        worker_id=source_worker["worker_id"],
                         category="review_block",
                         source_event_ids=review_result.get("source_event_ids", []),
+                        round_id=round_id,
+                        contract_id=source_worker.get("contract_id", ""),
                         artifact_refs=review_verdict.evidence_refs,
-                        learning_feedback=learning_feedback,
                     )
                     repair_requests.append(summary)
                     events.append({"action": "challenge", "round": round_index, "summary": summary})
                     continue
                 repair_requests.clear()
 
+            _progress("verifying", round_index)
             verification_results = [
                 self._controller.verify(
                     crew_id=crew_id,
@@ -345,16 +370,15 @@ class V4CrewRunner:
 
             verification_failures.extend(failed)
             summary = "; ".join(result.get("summary", "verification failed") for result in failed)
-            self._controller.challenge(crew_id=crew_id, summary=summary)
-            self._append_challenge_and_repair_events(
+            self._controller.challenge(
                 crew_id=crew_id,
-                worker=source_worker,
-                round_id=round_id,
                 summary=summary,
+                worker_id=source_worker["worker_id"],
                 category="verification_failed",
                 source_event_ids=[event.event_id for event in verification_events],
+                round_id=round_id,
+                contract_id=source_worker.get("contract_id", ""),
                 artifact_refs=[ref for event in verification_events for ref in event.artifact_refs],
-                learning_feedback=learning_feedback,
             )
             repair_requests.append(summary)
             events.append({"action": "challenge", "round": round_index, "summary": summary})
@@ -406,7 +430,6 @@ class V4CrewRunner:
         if action.action_type is not DecisionActionType.SPAWN_WORKER or action.contract is None:
             self._workflow.require_human(crew_id=crew_id, reason=action.reason)
             raise ValueError(f"V4 planner did not create a source worker: {action.reason}")
-        self._record_decision_if_supported(crew_id, action.to_dict())
         return self._controller.ensure_worker(
             repo_root=repo_root,
             crew_id=crew_id,
@@ -428,6 +451,7 @@ class V4CrewRunner:
         repo_report: dict[str, Any],
         learning_projection: LearningProjection,
         allow_dirty_base: bool,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         review_worker = self._review_worker(
             details,
@@ -472,6 +496,7 @@ class V4CrewRunner:
                     repo_report=repo_report,
                 ),
                 expected_marker=marker,
+                cancel_event=cancel_event,
             )
         finally:
             self._controller.release_worker(crew_id, review_worker_id)
@@ -484,8 +509,13 @@ class V4CrewRunner:
             }
         )
         if turn_result.get("status") != "turn_completed":
+            status_map = {
+                "turn_failed": "review_failed",
+                "turn_timeout": "review_timeout",
+                "turn_cancelled": "review_cancelled",
+            }
             return {
-                "status": "waiting_for_worker",
+                "status": status_map.get(turn_result.get("status"), "waiting_for_worker"),
                 "worker_id": review_worker["worker_id"],
                 "reason": turn_result.get("reason", "review completion evidence not found"),
                 "events": events,
@@ -562,7 +592,6 @@ class V4CrewRunner:
         if action.action_type is not DecisionActionType.SPAWN_WORKER or action.contract is None:
             self._workflow.require_human(crew_id=crew_id, reason="review_worker_unavailable")
             raise ValueError("V4 planner did not create a review worker")
-        self._record_decision_if_supported(crew_id, action.to_dict())
         return self._controller.ensure_worker(
             repo_root=repo_root,
             crew_id=crew_id,
@@ -681,11 +710,6 @@ class V4CrewRunner:
         ]
         return roots or ["src/", "tests/"]
 
-    def _record_decision_if_supported(self, crew_id: str, action: dict[str, Any]) -> None:
-        recorder = getattr(self._controller, "record_decision", None)
-        if recorder is not None:
-            recorder(crew_id=crew_id, action=action)
-
     def _append_verification_events(
         self,
         *,
@@ -745,54 +769,6 @@ class V4CrewRunner:
             },
             artifact_refs=verdict.evidence_refs,
         )
-
-    def _append_challenge_and_repair_events(
-        self,
-        *,
-        crew_id: str,
-        worker: dict[str, Any],
-        round_id: str,
-        summary: str,
-        category: str,
-        source_event_ids: list[str],
-        artifact_refs: list[str],
-        learning_feedback: GovernedLearningFeedback | None = None,
-    ) -> None:
-        challenge_event = self._events.append(
-            stream_id=crew_id,
-            type="challenge.issued",
-            crew_id=crew_id,
-            worker_id=worker["worker_id"],
-            round_id=round_id,
-            contract_id=worker.get("contract_id", ""),
-            idempotency_key=f"{crew_id}/{round_id}/{worker['worker_id']}/challenge/{category}",
-            payload={
-                "severity": "block",
-                "category": category,
-                "finding": summary,
-                "required_response": "Repair the source worker output before verification or accept.",
-                "repair_allowed": True,
-                "source_event_ids": source_event_ids,
-            },
-            artifact_refs=artifact_refs,
-        )
-        self._events.append(
-            stream_id=crew_id,
-            type="repair.requested",
-            crew_id=crew_id,
-            worker_id=worker["worker_id"],
-            round_id=round_id,
-            contract_id=worker.get("contract_id", ""),
-            idempotency_key=f"{crew_id}/{round_id}/{worker['worker_id']}/repair/{category}",
-            payload={
-                "challenge_event_id": challenge_event.event_id,
-                "instruction": summary,
-                "worker_policy": "same_worker",
-            },
-            artifact_refs=artifact_refs,
-        )
-        if learning_feedback is not None:
-            learning_feedback.record_challenge(challenge_event)
 
     def _parse_review_verdict(self, *, crew_id: str, turn_id: str) -> tuple[ReviewVerdict, list[AgentEvent]]:
         source_events = [

@@ -232,7 +232,7 @@ def test_v4_crew_runner_prefers_typed_review_payload_over_summary_block(tmp_path
 
 def test_v4_crew_runner_repair_loop_on_blocking_review(tmp_path: Path) -> None:
     store = SQLiteEventStore(tmp_path / "events.sqlite3")
-    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    controller = FakeController([{"passed": True, "summary": "command passed"}], event_store=store)
     supervisor = FakeV4Supervisor(
         [
             {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
@@ -284,7 +284,7 @@ def test_v4_crew_runner_creates_learning_feedback_after_repeated_review_blocks(
     tmp_path: Path,
 ) -> None:
     store = SQLiteEventStore(tmp_path / "events.sqlite3")
-    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    controller = FakeController([{"passed": True, "summary": "command passed"}], event_store=store)
     supervisor = FakeV4Supervisor(
         [
             {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
@@ -312,15 +312,11 @@ def test_v4_crew_runner_creates_learning_feedback_after_repeated_review_blocks(
 
     events = store.list_stream("crew-1")
     assert result["status"] == "max_rounds_exhausted"
-    assert [event.type for event in events][-3:] == [
-        "learning.note_created",
-        "guardrail.candidate_created",
-        "worker.quality_updated",
-    ]
-    quality = [event for event in events if event.type == "worker.quality_updated"][0]
-    assert quality.worker_id == "worker-source"
-    assert quality.payload["score_delta"] == -2
-    assert quality.payload["reason_codes"] == ["repeated_review_block"]
+    # Learning feedback events are no longer emitted by crew_runner (removed dual-write)
+    # Challenge events are now emitted by controller.challenge()
+    challenge_events = [event for event in events if event.type == "challenge.issued"]
+    assert len(challenge_events) == 2
+    assert all(event.worker_id == "worker-source" for event in challenge_events)
 
 
 def test_v4_crew_runner_creates_learning_feedback_after_repeated_verification_failures(
@@ -331,7 +327,8 @@ def test_v4_crew_runner_creates_learning_feedback_after_repeated_verification_fa
         [
             {"passed": False, "summary": "unit tests failed"},
             {"passed": False, "summary": "unit tests still failed"},
-        ]
+        ],
+        event_store=store,
     )
     supervisor = FakeV4Supervisor(
         [
@@ -360,15 +357,10 @@ def test_v4_crew_runner_creates_learning_feedback_after_repeated_verification_fa
 
     events = store.list_stream("crew-1")
     assert result["status"] == "max_rounds_exhausted"
-    assert [event.type for event in events][-3:] == [
-        "learning.note_created",
-        "guardrail.candidate_created",
-        "worker.quality_updated",
-    ]
-    quality = [event for event in events if event.type == "worker.quality_updated"][0]
-    assert quality.worker_id == "worker-source"
-    assert quality.payload["score_delta"] == -3
-    assert quality.payload["reason_codes"] == ["repeated_verification_failed"]
+    # Learning feedback events are no longer emitted by crew_runner (removed dual-write)
+    # Challenge events are now emitted by controller.challenge()
+    challenge_events = [event for event in events if event.type == "challenge.issued"]
+    assert len(challenge_events) == 2
 
 
 def test_v4_crew_runner_waits_without_recording_changes_when_turn_is_not_terminal(
@@ -462,12 +454,196 @@ def test_v4_crew_runner_claims_and_releases_source_worker(tmp_path: Path) -> Non
     assert ("crew-1", "worker-source") in controller.released
 
 
+def test_v4_crew_runner_supervise_calls_progress_callback(tmp_path: Path) -> None:
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    supervisor = FakeV4Supervisor(
+        [
+            {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
+            {"status": "turn_completed", "turn_id": "round-1-worker-review-review"},
+        ],
+        event_store=store,
+        review_summaries=[
+            "<<<CODEX_REVIEW\nverdict: OK\nsummary: patch matches spec and quality bar\nfindings:\n>>>"
+        ],
+    )
+
+    phases: list[tuple[str, int, int]] = []
+
+    def on_progress(phase: str, round_idx: int, max_rounds: int) -> None:
+        phases.append((phase, round_idx, max_rounds))
+
+    result = V4CrewRunner(
+        controller=controller,
+        supervisor=supervisor,
+        event_store=store,
+    ).supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+        progress_callback=on_progress,
+    )
+
+    assert result["status"] == "ready_for_codex_accept"
+    phase_names = [p[0] for p in phases]
+    assert "spawning" in phase_names
+    assert "polling" in phase_names
+    assert "verifying" in phase_names
+    # All phases called with round=1, max_rounds=1
+    assert all(p[1] == 1 and p[2] == 1 for p in phases)
+
+
+def test_v4_crew_runner_supervise_progress_callback_none_by_default(tmp_path: Path) -> None:
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    supervisor = FakeV4Supervisor(
+        [
+            {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
+            {"status": "turn_completed", "turn_id": "round-1-worker-review-review"},
+        ],
+        event_store=store,
+        review_summaries=[
+            "<<<CODEX_REVIEW\nverdict: OK\nsummary: patch matches spec and quality bar\nfindings:\n>>>"
+        ],
+    )
+
+    # Should not raise when progress_callback is None
+    result = V4CrewRunner(
+        controller=controller,
+        supervisor=supervisor,
+        event_store=store,
+    ).supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    assert result["status"] == "ready_for_codex_accept"
+
+
+def test_v4_crew_runner_supervise_progress_callback_exception_guard(tmp_path: Path) -> None:
+    """A misbehaving progress_callback must not crash the supervise loop."""
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    supervisor = FakeV4Supervisor(
+        [
+            {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
+            {"status": "turn_completed", "turn_id": "round-1-worker-review-review"},
+        ],
+        event_store=store,
+        review_summaries=[
+            "<<<CODEX_REVIEW\nverdict: OK\nsummary: patch matches spec and quality bar\nfindings:\n>>>"
+        ],
+    )
+
+    def bad_callback(phase: str, round_idx: int, max_rounds: int) -> None:
+        raise RuntimeError("callback exploded")
+
+    result = V4CrewRunner(
+        controller=controller,
+        supervisor=supervisor,
+        event_store=store,
+    ).supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+        progress_callback=bad_callback,
+    )
+
+    # Must complete successfully despite callback errors
+    assert result["status"] == "ready_for_codex_accept"
+
+
+def test_run_review_maps_turn_failed_to_review_failed(tmp_path: Path) -> None:
+    """_run_review should map turn_failed to review_failed, not waiting_for_worker."""
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    supervisor = FakeV4Supervisor(
+        [
+            {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
+            {"status": "turn_failed", "turn_id": "round-1-worker-review-review", "reason": "crash"},
+        ],
+        event_store=store,
+    )
+
+    result = V4CrewRunner(
+        controller=controller,
+        supervisor=supervisor,
+        event_store=store,
+    ).supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    assert result["status"] == "review_failed"
+    assert "crash" in result["reason"]
+
+
+def test_run_review_maps_turn_timeout_to_review_timeout(tmp_path: Path) -> None:
+    """_run_review should map turn_timeout to review_timeout, not waiting_for_worker."""
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    supervisor = FakeV4Supervisor(
+        [
+            {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
+            {"status": "turn_timeout", "turn_id": "round-1-worker-review-review", "reason": "poll timeout"},
+        ],
+        event_store=store,
+    )
+
+    result = V4CrewRunner(
+        controller=controller,
+        supervisor=supervisor,
+        event_store=store,
+    ).supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    assert result["status"] == "review_timeout"
+    assert "poll timeout" in result["reason"]
+
+
+def test_run_review_maps_turn_cancelled_to_review_cancelled(tmp_path: Path) -> None:
+    """_run_review should map turn_cancelled to review_cancelled, not waiting_for_worker."""
+    store = SQLiteEventStore(tmp_path / "events.sqlite3")
+    controller = FakeController([{"passed": True, "summary": "command passed"}])
+    supervisor = FakeV4Supervisor(
+        [
+            {"status": "turn_completed", "turn_id": "round-1-worker-source-source"},
+            {"status": "turn_cancelled", "turn_id": "round-1-worker-review-review", "reason": "user cancelled"},
+        ],
+        event_store=store,
+    )
+
+    result = V4CrewRunner(
+        controller=controller,
+        supervisor=supervisor,
+        event_store=store,
+    ).supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    assert result["status"] == "review_cancelled"
+    assert "user cancelled" in result["reason"]
+
+
 class FakeCrew:
     crew_id = "crew-1"
 
 
 class FakeController:
-    def __init__(self, verification_results: list[dict], workers: list[dict] | None = None) -> None:
+    def __init__(self, verification_results: list[dict], workers: list[dict] | None = None, event_store=None) -> None:
         self.verification_results = list(verification_results)
         self.started = []
         self.ensured = []
@@ -477,6 +653,7 @@ class FakeController:
         self.claimed = []
         self.released = []
         self.repo_root = None
+        self._event_store = event_store
         self.status_payload = {
             "crew": {"crew_id": "crew-1", "root_goal": "Fix tests"},
             "workers": workers if workers is not None else [_source_worker(), _review_worker()],
@@ -527,6 +704,48 @@ class FakeController:
 
     def challenge(self, **kwargs):
         self.challenge_called.append(kwargs)
+        if self._event_store:
+            crew_id = kwargs.get("crew_id", "crew-1")
+            worker_id = kwargs.get("worker_id", "")
+            category = kwargs.get("category", "")
+            round_id = kwargs.get("round_id", "")
+            contract_id = kwargs.get("contract_id", "")
+            summary = kwargs.get("summary", "")
+            source_event_ids = kwargs.get("source_event_ids", [])
+            artifact_refs = kwargs.get("artifact_refs", [])
+            challenge_event = self._event_store.append(
+                stream_id=crew_id,
+                type="challenge.issued",
+                crew_id=crew_id,
+                worker_id=worker_id,
+                round_id=round_id,
+                contract_id=contract_id,
+                idempotency_key=f"{crew_id}/{round_id}/{worker_id}/challenge/{category}",
+                payload={
+                    "severity": "block",
+                    "category": category,
+                    "finding": summary,
+                    "required_response": "Repair the source worker output before verification or accept.",
+                    "repair_allowed": True,
+                    "source_event_ids": source_event_ids,
+                },
+                artifact_refs=artifact_refs,
+            )
+            self._event_store.append(
+                stream_id=crew_id,
+                type="repair.requested",
+                crew_id=crew_id,
+                worker_id=worker_id,
+                round_id=round_id,
+                contract_id=contract_id,
+                idempotency_key=f"{crew_id}/{round_id}/{worker_id}/repair/{category}",
+                payload={
+                    "challenge_event_id": challenge_event.event_id,
+                    "instruction": summary,
+                    "worker_policy": "same_worker",
+                },
+                artifact_refs=artifact_refs,
+            )
         return {"summary": kwargs["summary"]}
 
     def claim_worker(self, crew_id, worker_id):
@@ -562,7 +781,7 @@ class FakeV4Supervisor:
     def run_worker_turn(self, **kwargs):
         self.turns.append(kwargs)
         result = self.results.pop(0)
-        if kwargs.get("phase") == "review" and self.event_store is not None:
+        if kwargs.get("phase") == "review" and self.event_store is not None and result.get("status") == "turn_completed":
             summary = self.review_summaries.pop(0)
             review = self.review_payloads.pop(0) if self.review_payloads else None
             self.event_store.append(
