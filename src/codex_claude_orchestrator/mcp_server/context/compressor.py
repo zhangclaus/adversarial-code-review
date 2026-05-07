@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 _KEY_EVENT_TYPES = frozenset([
     "crew.started",
     "turn.completed",
@@ -92,3 +95,56 @@ def compress_blackboard(
 def filter_events(events: list[dict], *, limit: int = 20) -> list[dict]:
     key_events = [e for e in events if e.get("type") in _KEY_EVENT_TYPES]
     return key_events[-limit:]
+
+
+def read_latest_outbox(repo_root: Path, crew_id: str, worker_id: str) -> dict | None:
+    """Read the latest outbox JSON for a worker. Returns None if not found."""
+    outbox_dir = (
+        repo_root / ".orchestrator" / "crews" / crew_id
+        / "artifacts" / "v4" / "workers" / worker_id / "outbox"
+    )
+    if not outbox_dir.is_dir():
+        return None
+
+    json_files = sorted(outbox_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    for path in reversed(json_files):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return None
+
+
+def compress_observe_result(
+    raw_observation: dict,
+    outbox: dict | None = None,
+    *,
+    worker_id: str = "",
+) -> dict:
+    """Extract structured report from worker observation + outbox data."""
+    if outbox:
+        status = outbox.get("status")
+        if not status:
+            status = "completed" if raw_observation.get("marker_seen") else "running"
+        return {
+            "worker_id": outbox.get("worker_id", worker_id),
+            "status": status,
+            "summary": outbox.get("summary", ""),
+            "changed_files": outbox.get("changed_files", []),
+            "risks": outbox.get("risks", []),
+            "next_suggested_action": outbox.get("next_suggested_action", ""),
+            "messages": raw_observation.get("message_blocks", []),
+            "marker_seen": raw_observation.get("marker_seen", False),
+        }
+
+    marker_seen = raw_observation.get("marker_seen", False)
+    return {
+        "worker_id": worker_id,
+        "status": "completed" if marker_seen else "running",
+        "summary": "",
+        "changed_files": [],
+        "risks": [],
+        "next_suggested_action": "",
+        "messages": raw_observation.get("message_blocks", []),
+        "marker_seen": marker_seen,
+    }
