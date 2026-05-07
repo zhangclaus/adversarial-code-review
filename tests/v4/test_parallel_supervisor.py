@@ -1,0 +1,387 @@
+"""Tests for the ParallelSupervisor two-layer adversarial review system."""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from codex_claude_orchestrator.v4.parallel_supervisor import ParallelSupervisor
+from codex_claude_orchestrator.v4.subtask import SubTask
+
+
+def _make_subtask(task_id: str, description: str = "", scope: list[str] | None = None) -> SubTask:
+    return SubTask(
+        task_id=task_id,
+        description=description or f"Task {task_id}",
+        scope=scope or ["src/"],
+    )
+
+
+def _make_controller(*, changes_map: dict[str, dict] | None = None, verify_results: list[dict] | None = None):
+    """Build a mock controller with configurable changes/verify/challenge/ensure_worker."""
+    controller = MagicMock()
+    default_worker_idx = [0]
+
+    def ensure_worker_side_effect(*, repo_root, crew_id, contract, allow_dirty_base=False):
+        wid = f"worker-{contract.contract_id}"
+        return {"worker_id": wid, "contract_id": contract.contract_id}
+
+    controller.ensure_worker = MagicMock(side_effect=ensure_worker_side_effect)
+
+    # changes: return per-worker or default
+    if changes_map is not None:
+        def changes_side_effect(*, crew_id, worker_id=None):
+            return changes_map.get(worker_id, {"changed_files": [], "worker_id": worker_id})
+        controller.changes = MagicMock(side_effect=changes_side_effect)
+    else:
+        controller.changes = MagicMock(return_value={"changed_files": ["src/app.py"], "worker_id": "worker-x"})
+
+    # verify
+    verify_iter = iter(verify_results or [{"passed": True, "summary": "ok"}])
+    controller.verify = MagicMock(side_effect=lambda **kw: next(verify_iter))
+
+    controller.challenge = MagicMock(return_value={"crew_id": "crew-1", "summary": "", "task_id": None})
+
+    return controller
+
+
+def _make_supervisor(*, turn_results: list[dict] | None = None):
+    """Build a mock supervisor with async_run_worker_turn."""
+    supervisor = MagicMock()
+    results = list(turn_results or [{"status": "turn_completed", "turn_id": "turn-1"}])
+    supervisor.async_run_worker_turn = AsyncMock(side_effect=lambda **kw: results.pop(0))
+    return supervisor
+
+
+def _make_event_store(*, events_by_turn: dict[str, list[dict]] | None = None):
+    """Build a mock event store with configurable list_by_turn results."""
+    store = MagicMock()
+    turn_events = events_by_turn or {}
+
+    def list_by_turn(turn_id):
+        raw_events = turn_events.get(turn_id, [])
+        mock_events = []
+        for ev in raw_events:
+            me = MagicMock()
+            me.type = ev.get("type", "")
+            me.payload = ev.get("payload", {})
+            me.worker_id = ev.get("worker_id", "")
+            mock_events.append(me)
+        return mock_events
+
+    store.list_by_turn = MagicMock(side_effect=list_by_turn)
+    return store
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parallel_watch_and_review_all_pass(tmp_path: Path) -> None:
+    """All workers complete and pass unit review."""
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/a.py"], "worker_id": "worker-source-task-1"},
+        "worker-source-task-2": {"changed_files": ["src/b.py"], "worker_id": "worker-source-task-2"},
+    }
+    controller = _make_controller(
+        changes_map=changes_map,
+        verify_results=[{"passed": True, "summary": "ok"}],
+    )
+    supervisor = _make_supervisor(
+        turn_results=[
+            {"status": "turn_completed", "turn_id": "t1"},
+            {"status": "turn_completed", "turn_id": "t2"},
+            # unit review turns
+            {"status": "turn_completed", "turn_id": "review-t1"},
+            {"status": "turn_completed", "turn_id": "review-t2"},
+        ]
+    )
+    event_store = _make_event_store(events_by_turn={
+        "review-t1": [],
+        "review-t2": [],
+    })
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    subtasks = [_make_subtask("task-1"), _make_subtask("task-2")]
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=subtasks,
+        verification_commands=["pytest -q"],
+        max_rounds=2,
+    )
+
+    assert result["status"] == "ready_for_codex_accept"
+    assert result["runtime"] == "v4-parallel"
+    assert subtasks[0].status == "passed"
+    assert subtasks[1].status == "passed"
+    # verify was called for integration
+    controller.verify.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_parallel_watch_and_review_failure(tmp_path: Path) -> None:
+    """Unit review failure marks subtask as failed and triggers challenge."""
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/a.py"], "worker_id": "worker-source-task-1"},
+    }
+    controller = _make_controller(
+        changes_map=changes_map,
+        verify_results=[{"passed": True, "summary": "ok"}],
+    )
+    supervisor = _make_supervisor(
+        turn_results=[
+            # source turn
+            {"status": "turn_completed", "turn_id": "source-turn-1"},
+            # unit review turn
+            {"status": "turn_completed", "turn_id": "review-turn-1"},
+        ]
+    )
+
+    # Create a mock event with BLOCK in the summary
+    block_event = MagicMock()
+    block_event.type = "worker.outbox.detected"
+    block_event.payload = {"summary": "BLOCK: code quality issues found"}
+    block_event.worker_id = "worker-reviewer"
+
+    event_store = MagicMock()
+    event_store.list_by_turn = MagicMock(return_value=[block_event])
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    subtasks = [_make_subtask("task-1")]
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=subtasks,
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    assert result["status"] == "max_rounds_exhausted"
+    assert subtasks[0].status == "failed"
+    controller.challenge.assert_called()
+    challenge_args = controller.challenge.call_args_list
+    assert any("unit_review_fail" in str(call) for call in challenge_args)
+
+
+@pytest.mark.asyncio
+async def test_integration_review_detects_conflicts(tmp_path: Path) -> None:
+    """Same file changed by multiple workers = conflict."""
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/shared.py"], "worker_id": "worker-source-task-1"},
+        "worker-source-task-2": {"changed_files": ["src/shared.py"], "worker_id": "worker-source-task-2"},
+    }
+    controller = _make_controller(
+        changes_map=changes_map,
+        verify_results=[{"passed": True, "summary": "ok"}],
+    )
+    supervisor = _make_supervisor(
+        turn_results=[
+            {"status": "turn_completed", "turn_id": "t1"},
+            {"status": "turn_completed", "turn_id": "t2"},
+            # unit review reviewer turns
+            {"status": "turn_completed", "turn_id": "review-t1"},
+            {"status": "turn_completed", "turn_id": "review-t2"},
+        ]
+    )
+    event_store = _make_event_store(events_by_turn={
+        "review-t1": [],
+        "review-t2": [],
+    })
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    subtasks = [_make_subtask("task-1"), _make_subtask("task-2")]
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=subtasks,
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+    )
+
+    assert result["status"] == "max_rounds_exhausted"
+    # Should have attempted challenge for conflict
+    controller.challenge.assert_called()
+    challenge_calls = controller.challenge.call_args_list
+    assert any("integration_conflict" in str(call) for call in challenge_calls)
+
+
+@pytest.mark.asyncio
+async def test_integration_review_passes_no_conflicts(tmp_path: Path) -> None:
+    """No conflicts and tests pass = integration pass."""
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/a.py"], "worker_id": "worker-source-task-1"},
+        "worker-source-task-2": {"changed_files": ["src/b.py"], "worker_id": "worker-source-task-2"},
+    }
+    controller = _make_controller(
+        changes_map=changes_map,
+        verify_results=[{"passed": True, "summary": "all tests passed"}],
+    )
+    supervisor = _make_supervisor(
+        turn_results=[
+            {"status": "turn_completed", "turn_id": "t1"},
+            {"status": "turn_completed", "turn_id": "t2"},
+            # unit review reviewer turns
+            {"status": "turn_completed", "turn_id": "review-t1"},
+            {"status": "turn_completed", "turn_id": "review-t2"},
+        ]
+    )
+    event_store = _make_event_store(events_by_turn={
+        "review-t1": [],
+        "review-t2": [],
+    })
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    subtasks = [_make_subtask("task-1"), _make_subtask("task-2")]
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=subtasks,
+        verification_commands=["pytest -q"],
+        max_rounds=2,
+    )
+
+    assert result["status"] == "ready_for_codex_accept"
+    assert result["runtime"] == "v4-parallel"
+    assert subtasks[0].status == "passed"
+    assert subtasks[1].status == "passed"
+
+
+@pytest.mark.asyncio
+async def test_detect_conflicts(tmp_path: Path) -> None:
+    """_detect_conflicts finds files changed by multiple workers."""
+    ps = ParallelSupervisor(
+        controller=MagicMock(),
+        supervisor=MagicMock(),
+        event_store=MagicMock(),
+    )
+    all_changes = [
+        {"worker_id": "w1", "changed_files": ["src/a.py", "src/b.py"]},
+        {"worker_id": "w2", "changed_files": ["src/b.py", "src/c.py"]},
+    ]
+    conflicts = ps._detect_conflicts(all_changes)
+    assert "src/b.py" in conflicts
+    assert set(conflicts["src/b.py"]) == {"w1", "w2"}
+    assert "src/a.py" not in conflicts
+    assert "src/c.py" not in conflicts
+
+
+@pytest.mark.asyncio
+async def test_cancel_event_stops_supervision(tmp_path: Path) -> None:
+    """Setting cancel_event before supervise starts should return cancelled immediately."""
+    controller = _make_controller()
+    supervisor = _make_supervisor()
+    event_store = _make_event_store()
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    cancel = threading.Event()
+    cancel.set()  # Pre-cancel
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=[_make_subtask("task-1")],
+        verification_commands=["pytest -q"],
+        cancel_event=cancel,
+    )
+
+    assert result["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_verification_failure_challenges_and_retries(tmp_path: Path) -> None:
+    """When verification fails, integration challenges and retries next round."""
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/a.py"], "worker_id": "worker-source-task-1"},
+    }
+    controller = _make_controller(
+        changes_map=changes_map,
+        verify_results=[
+            {"passed": False, "summary": "test failure"},
+            {"passed": True, "summary": "ok"},
+        ],
+    )
+    supervisor = _make_supervisor(
+        turn_results=[
+            # Round 1: source + unit review
+            {"status": "turn_completed", "turn_id": "r1-source"},
+            {"status": "turn_completed", "turn_id": "r1-review"},
+            # Round 2: source + unit review
+            {"status": "turn_completed", "turn_id": "r2-source"},
+            {"status": "turn_completed", "turn_id": "r2-review"},
+        ]
+    )
+    event_store = _make_event_store(events_by_turn={
+        "r1-review": [],
+        "r2-review": [],
+    })
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    subtasks = [_make_subtask("task-1")]
+
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=subtasks,
+        verification_commands=["pytest -q"],
+        max_rounds=2,
+    )
+
+    assert result["status"] == "ready_for_codex_accept"
+    assert result["rounds"] == 2
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_invoked(tmp_path: Path) -> None:
+    """Progress callback should be called with watching and integration phases."""
+    changes_map = {
+        "worker-source-task-1": {"changed_files": ["src/a.py"], "worker_id": "worker-source-task-1"},
+    }
+    controller = _make_controller(
+        changes_map=changes_map,
+        verify_results=[{"passed": True, "summary": "ok"}],
+    )
+    supervisor = _make_supervisor(
+        turn_results=[
+            {"status": "turn_completed", "turn_id": "t1"},
+            {"status": "turn_completed", "turn_id": "review-t1"},
+        ]
+    )
+    event_store = _make_event_store(events_by_turn={"review-t1": []})
+
+    phases: list[tuple[str, int, int]] = []
+
+    def on_progress(phase: str, round_idx: int, max_rounds: int) -> None:
+        phases.append((phase, round_idx, max_rounds))
+
+    ps = ParallelSupervisor(controller=controller, supervisor=supervisor, event_store=event_store)
+    result = await ps.supervise(
+        repo_root=tmp_path,
+        crew_id="crew-1",
+        goal="Build feature X",
+        subtasks=[_make_subtask("task-1")],
+        verification_commands=["pytest -q"],
+        max_rounds=1,
+        progress_callback=on_progress,
+    )
+
+    assert result["status"] == "ready_for_codex_accept"
+    phase_names = [p[0] for p in phases]
+    assert "watching" in phase_names
+    assert "integration" in phase_names
