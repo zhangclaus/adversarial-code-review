@@ -163,14 +163,27 @@ class JobManager:
             job.current_round = round_index
             job.update_elapsed()
 
-    def get_job(self, job_id: str) -> Job:
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        """Return a snapshot dict of the job state."""
         with self._lock:
             self._evict_stale()
             job = self._jobs.get(job_id)
             if job is None:
                 raise KeyError(f"job not found: {job_id}")
             job.update_elapsed()
-            return job
+            return {
+                "job_id": job.job_id,
+                "status": job.status,
+                "phase": job.phase,
+                "current_round": job.current_round,
+                "max_rounds": job.max_rounds,
+                "elapsed_seconds": job.elapsed_seconds,
+                "result": job.result,
+                "error": job.error,
+                "cancel_event": job.cancel_event,
+                "completed_at": job.completed_at,
+                "subtasks": job.subtasks,
+            }
 
     def get_job_status(self, job_id: str) -> dict[str, Any]:
         """Return serialized job status snapshot, all under lock.
@@ -199,6 +212,34 @@ class JobManager:
                 ),
                 "subtasks": job.subtasks,
             }
+
+    def get_status_and_mark_reported(self, job_id: str) -> dict[str, Any]:
+        """Return serialized job status snapshot AND mark as reported, atomically."""
+        with self._lock:
+            self._evict_stale()
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(f"job not found: {job_id}")
+            job.update_elapsed()
+            result = {
+                "job_id": job.job_id,
+                "status": job.status,
+                "phase": job.phase,
+                "current_round": job.current_round,
+                "max_rounds": job.max_rounds,
+                "elapsed_seconds": job.elapsed_seconds,
+                "result": job.result,
+                "error": job.error,
+                "has_changed": (
+                    job.phase != job.last_reported_phase
+                    or job.current_round != job.last_reported_round
+                ),
+                "subtasks": job.subtasks,
+            }
+            # Atomically mark as reported
+            job.last_reported_phase = job.phase
+            job.last_reported_round = job.current_round
+            return result
 
     def mark_job_reported(self, job_id: str) -> None:
         """Mark a job's current state as reported (under lock)."""

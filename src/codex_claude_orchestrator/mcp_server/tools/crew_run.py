@@ -149,8 +149,31 @@ def register_run_tools(
                 )
             ]
 
-        # State changed — return meaningful info and mark reported
-        job_manager.mark_job_reported(job_id)
+        # State changed — return meaningful info and mark reported (atomically)
+        snap = job_manager.get_status_and_mark_reported(job_id)
+        elapsed = round(snap["elapsed_seconds"])
+        status = snap["status"]
+
+        # Re-check terminal after atomic mark (background thread may have completed)
+        if status in ("done", "failed", "cancelled"):
+            base = {
+                "job_id": snap["job_id"],
+                "status": status,
+                "elapsed": elapsed,
+                "rounds": snap["current_round"],
+            }
+            if status == "done" and snap["result"] is not None:
+                base["result"] = snap["result"]
+            if status == "failed" and snap["error"]:
+                base["error"] = snap["error"]
+            if snap.get("subtasks"):
+                base["subtasks"] = snap["subtasks"]
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(base, ensure_ascii=False),
+                )
+            ]
 
         # Build a temporary Job-like object for _next_poll_seconds
         class _Snap:
@@ -188,13 +211,21 @@ def register_run_tools(
                 )
             ]
         if not cancelled:
-            job = job_manager.get_job(job_id)
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"job_id": job_id, "status": job.status, "warning": "job already terminal"}),
-                )
-            ]
+            try:
+                job = job_manager.get_job(job_id)
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"job_id": job_id, "status": job["status"], "warning": "job already terminal"}),
+                    )
+                ]
+            except KeyError:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"job_id": job_id, "status": "unknown", "error": "job evicted during cancel"}),
+                    )
+                ]
         return [
             TextContent(
                 type="text",

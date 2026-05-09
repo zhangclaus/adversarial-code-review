@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 from codex_claude_orchestrator.mcp_server.job_manager import Job, JobManager, _next_poll_seconds
 
@@ -113,13 +114,13 @@ def test_job_manager_create_and_get(tmp_path):
 
     assert job_id.startswith("job-")
     job = manager.get_job(job_id)
-    assert job.job_id == job_id
+    assert job["job_id"] == job_id
 
     # Wait for completion
     time.sleep(0.2)
     job = manager.get_job(job_id)
-    assert job.status == "done"
-    assert job.result is not None
+    assert job["status"] == "done"
+    assert job["result"] is not None
 
 
 def test_job_manager_captures_errors(tmp_path):
@@ -135,8 +136,8 @@ def test_job_manager_captures_errors(tmp_path):
 
     time.sleep(0.2)
     job = manager.get_job(job_id)
-    assert job.status == "failed"
-    assert job.error == "something broke"
+    assert job["status"] == "failed"
+    assert job["error"] == "something broke"
 
 
 def test_job_manager_cancel(tmp_path):
@@ -158,8 +159,8 @@ def test_job_manager_cancel(tmp_path):
 
     manager.cancel_job(job_id)
     job = manager.get_job(job_id)
-    assert job.status == "cancelled"
-    assert job.cancel_event.is_set()
+    assert job["status"] == "cancelled"
+    assert job["cancel_event"].is_set()
 
 
 def test_job_manager_cancel_nonexistent():
@@ -228,7 +229,7 @@ def test_job_manager_progress_updates_phase(tmp_path):
     time.sleep(0.03)
     job = manager.get_job(job_id)
     # Phase should have advanced
-    assert job.phase in ("spawning", "polling", "idle")
+    assert job["phase"] in ("spawning", "polling", "idle")
     assert len(phases_recorded) >= 1
 
 
@@ -259,7 +260,7 @@ def test_job_manager_cancel_propagates_to_runner(tmp_path):
 
     assert cancel_observed.wait(timeout=1.0), "runner should observe cancel_event"
     job = manager.get_job(job_id)
-    assert job.status == "cancelled"
+    assert job["status"] == "cancelled"
 
 
 def test_job_cancelled_status_not_overwritten_by_completion(tmp_path):
@@ -283,12 +284,12 @@ def test_job_cancelled_status_not_overwritten_by_completion(tmp_path):
     # Cancel immediately
     manager.cancel_job(job_id)
     job = manager.get_job(job_id)
-    assert job.status == "cancelled"
+    assert job["status"] == "cancelled"
 
     # Wait for runner to finish
     time.sleep(0.2)
     job = manager.get_job(job_id)
-    assert job.status == "cancelled", "cancelled status must not revert to done"
+    assert job["status"] == "cancelled", "cancelled status must not revert to done"
 
 
 def test_job_manager_evicts_stale_jobs(tmp_path):
@@ -305,10 +306,10 @@ def test_job_manager_evicts_stale_jobs(tmp_path):
 
     time.sleep(0.2)
     job = manager.get_job(job_id)
-    assert job.status == "done"
+    assert job["status"] == "done"
 
-    # Fake old completion time
-    job.completed_at = time.monotonic() - 3700  # > 1 hour ago
+    # Fake old completion time via internal reference
+    manager._jobs[job_id].completed_at = time.monotonic() - 3700  # > 1 hour ago
 
     # Trigger eviction
     manager._evict_stale()
@@ -345,8 +346,8 @@ def test_job_manager_cancelled_has_completed_at(tmp_path):
     time.sleep(0.2)
 
     job = manager.get_job(job_id)
-    assert job.status == "cancelled"
-    assert job.completed_at is not None
+    assert job["status"] == "cancelled"
+    assert job["completed_at"] is not None
 
 
 def test_cancel_job_returns_false_for_terminal(tmp_path):
@@ -363,7 +364,7 @@ def test_cancel_job_returns_false_for_terminal(tmp_path):
 
     time.sleep(0.2)
     job = manager.get_job(job_id)
-    assert job.status == "done"
+    assert job["status"] == "done"
 
     result = manager.cancel_job(job_id)
     assert result is False
@@ -446,7 +447,7 @@ def test_cancelled_job_stores_result(tmp_path):
     time.sleep(0.3)
     job = manager.get_job(job_id)
     # Result should be stored even though job was cancelled
-    assert job.result is not None
+    assert job["result"] is not None
 
 
 def test_mark_job_reported(tmp_path):
@@ -499,8 +500,8 @@ def test_job_manager_create_parallel_job(tmp_path):
 
     time.sleep(0.3)
     job = manager.get_job(job_id)
-    assert job.status == "done"
-    assert job.result is not None
+    assert job["status"] == "done"
+    assert job["result"] is not None
 
 
 def test_create_job_with_external_subtasks(tmp_path):
@@ -527,4 +528,37 @@ def test_create_job_with_external_subtasks(tmp_path):
     assert job_id.startswith("job-")
     time.sleep(0.3)
     job = manager.get_job(job_id)
-    assert job.status == "done"
+    assert job["status"] == "done"
+
+
+class TestAtomicStatusAndMark:
+    def test_get_status_and_mark_reported_is_atomic(self):
+        """H6: get_status_and_mark_reported must atomically return snapshot and mark."""
+        manager = JobManager()
+        job_id = manager.create_job(
+            runner=FakeRunner(delay=10.0),
+            repo_root=Path("/tmp"),
+            goal="test",
+        )
+        # First call should show has_changed=True (phase changed from initial)
+        snap = manager.get_status_and_mark_reported(job_id)
+        assert snap["has_changed"] is True
+        # Second call should show has_changed=False (already marked)
+        snap2 = manager.get_status_and_mark_reported(job_id)
+        assert snap2["has_changed"] is False
+        manager.cancel_job(job_id)
+
+    def test_get_job_returns_dict_snapshot(self):
+        """H7: get_job must return a dict snapshot, not a mutable Job reference."""
+        manager = JobManager()
+        job_id = manager.create_job(
+            runner=FakeRunner(delay=10.0),
+            repo_root=Path("/tmp"),
+            goal="test",
+        )
+        result = manager.get_job(job_id)
+        assert isinstance(result, dict)
+        assert result["job_id"] == job_id
+        assert "status" in result
+        assert "phase" in result
+        manager.cancel_job(job_id)
