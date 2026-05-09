@@ -561,3 +561,45 @@ class TestAtomicStatusAndMark:
         assert "status" in result
         assert "phase" in result
         manager.cancel_job(job_id)
+
+
+class TestGracefulShutdown:
+    def test_shutdown_cancels_running_jobs(self):
+        """H9: shutdown() must cancel all running jobs and wait for threads."""
+        manager = JobManager()
+        job_id = manager.create_job(
+            runner=FakeRunner(delay=10.0),
+            repo_root=Path("/tmp"),
+            goal="test",
+        )
+        assert manager.get_job(job_id)["status"] == "running"
+
+        manager.shutdown(timeout=2.0)
+
+        snap = manager.get_job(job_id)
+        assert snap["status"] == "cancelled"
+
+    def test_shutdown_joins_threads(self):
+        """H9: shutdown() must join background threads."""
+        manager = JobManager()
+        job_id = manager.create_job(
+            runner=FakeRunner(result={"status": "done"}),
+            repo_root=Path("/tmp"),
+            goal="test",
+        )
+        time.sleep(0.1)  # let it finish
+        thread = manager._jobs[job_id].thread
+        manager.shutdown(timeout=2.0)
+        assert not thread.is_alive()
+
+    def test_shutdown_idempotent(self):
+        """shutdown() can be called multiple times safely."""
+        manager = JobManager()
+        manager.create_job(
+            runner=FakeRunner(delay=10.0),
+            repo_root=Path("/tmp"),
+            goal="test",
+        )
+        manager.shutdown(timeout=2.0)
+        # Second call should not raise
+        manager.shutdown(timeout=2.0)

@@ -64,6 +64,7 @@ class JobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        self._shutdown_event = threading.Event()
 
     def create_job(
         self,
@@ -289,6 +290,33 @@ class JobManager:
         ]
         for jid in stale:
             del self._jobs[jid]
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Cancel all running jobs and join all background threads.
+
+        Safe to call multiple times — subsequent calls are no-ops.
+        """
+        if self._shutdown_event.is_set():
+            return
+        self._shutdown_event.set()
+
+        # Phase 1: signal cancellation to all running jobs
+        with self._lock:
+            for job in self._jobs.values():
+                if job.status == "running":
+                    job.cancel_event.set()
+                    job.status = "cancelled"
+
+        # Phase 2: join all threads (outside lock to avoid deadlock)
+        threads: list[threading.Thread] = []
+        with self._lock:
+            threads = [
+                j.thread for j in self._jobs.values()
+                if j.thread is not None
+            ]
+
+        for thread in threads:
+            thread.join(timeout=timeout)
 
 
 def _split_goal_into_subtasks(goal: str) -> list:

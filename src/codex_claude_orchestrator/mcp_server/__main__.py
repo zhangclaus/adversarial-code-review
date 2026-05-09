@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 
 
@@ -40,11 +41,26 @@ def _build_controller():
     return controller
 
 
+def _handle_shutdown(job_manager: "JobManager", server: object, loop: asyncio.AbstractEventLoop) -> None:
+    """Graceful shutdown: cancel jobs, then stop the event loop."""
+    job_manager.shutdown(timeout=3.0)
+    loop.call_soon(loop.stop)
+
+
 async def main() -> None:
+    from codex_claude_orchestrator.mcp_server.job_manager import JobManager
     from codex_claude_orchestrator.mcp_server.server import create_server
 
     controller = _build_controller()
-    server = create_server(controller=controller)
+    job_manager = JobManager()
+    server = create_server(controller=controller, job_manager=job_manager)
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(
+            sig, lambda: _handle_shutdown(job_manager, server, loop)
+        )
+
     await server.run_stdio_async()
 
 
