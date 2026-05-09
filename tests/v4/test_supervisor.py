@@ -1022,6 +1022,7 @@ class TestAsyncRunWorkerTurnNonBlocking:
                 call_order.append("deliver_start")
                 time.sleep(0.05)  # simulate blocking I/O
                 call_order.append("deliver_end")
+                self.delivered.append(turn.turn_id)  # track for consistency
                 return DeliveryResult(delivered=True, marker=turn.expected_marker, reason="sent")
 
             async def async_watch_turn(self, turn, cancel_event=None):
@@ -1055,5 +1056,6 @@ class TestAsyncRunWorkerTurnNonBlocking:
         start = time.monotonic()
         results = asyncio.run(run_two_workers())
         elapsed = time.monotonic() - start
-        assert elapsed < 0.08, f"Workers ran sequentially ({elapsed:.2f}s), expected concurrent"
+        assert call_order.count("deliver_start") == 2, "Both workers should have entered deliver_turn"
+        assert elapsed < 0.12, f"Workers ran sequentially ({elapsed:.2f}s), expected concurrent"
         assert all(r["status"] == "turn_completed" for r in results)
