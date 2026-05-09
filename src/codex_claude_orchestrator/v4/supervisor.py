@@ -367,11 +367,17 @@ class V4Supervisor:
 
     def _evaluate_completed_turn_if_configured(self, event: AgentEvent) -> None:
         if event.type == "turn.completed" and self._adversarial_evaluator is not None:
-            self._adversarial_evaluator.evaluate_completed_turn(event)
+            try:
+                self._adversarial_evaluator.evaluate_completed_turn(event)
+            except Exception:
+                pass  # evaluator failure must not abort turn result return
 
     def _process_message_ack_if_configured(self, event: AgentEvent) -> None:
         if self._message_ack_processor is not None:
-            self._message_ack_processor.process(event)
+            try:
+                self._message_ack_processor.process(event)
+            except Exception:
+                pass  # ack callback failure must not abort the event loop
 
     def _commit_runtime_events_if_supported(
         self,

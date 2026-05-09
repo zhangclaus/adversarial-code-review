@@ -265,15 +265,15 @@ def test_v4_supervisor_retries_adversarial_evaluator_for_existing_completed_turn
         adversarial_evaluator=evaluator,
     )
 
-    with pytest.raises(RuntimeError, match="evaluation failed"):
-        first_supervisor.run_source_turn(
-            crew_id="crew-1",
-            goal="Fix tests",
-            worker_id="worker-1",
-            round_id="round-1",
-            message="Implement",
-            expected_marker="marker-1",
-        )
+    result = first_supervisor.run_source_turn(
+        crew_id="crew-1",
+        goal="Fix tests",
+        worker_id="worker-1",
+        round_id="round-1",
+        message="Implement",
+        expected_marker="marker-1",
+    )
+    assert result["status"] == "turn_completed"
 
     resumed_supervisor = V4Supervisor(
         event_store=store,
@@ -959,3 +959,51 @@ async def test_async_run_worker_turn_completes_turn(tmp_path: Path):
         "worker.outbox.detected",
         "turn.completed",
     ]
+
+
+class TestMessageAckExceptionSafety:
+    def test_ack_exception_does_not_abort_event_loop(self, tmp_path: Path):
+        """H2: Exception in message_ack_processor must not abort the event loop."""
+        class FailingAckProcessor:
+            def process(self, event):
+                raise RuntimeError("ack failed")
+
+        adapter = FakeAdapter(events=lambda turn: [completed_outbox_event(turn)])
+        store = SQLiteEventStore(tmp_path / "events.sqlite3")
+        supervisor = V4Supervisor(
+            event_store=store,
+            artifact_store=ArtifactStore(tmp_path / "artifacts"),
+            adapter=adapter,
+            message_ack_processor=FailingAckProcessor(),
+        )
+
+        result = supervisor.run_source_turn(
+            crew_id="c1", goal="test", worker_id="w1",
+            round_id="r1",
+            message="go", expected_marker="<<<DONE>>>",
+        )
+        assert result["status"] == "turn_completed"
+
+
+class TestEvaluatorExceptionSafety:
+    def test_evaluator_exception_does_not_abort_return(self, tmp_path: Path):
+        """H3: Exception in adversarial_evaluator must not abort turn result."""
+        class FailingEvaluator:
+            def evaluate_completed_turn(self, event):
+                raise RuntimeError("evaluator exploded")
+
+        adapter = FakeAdapter(events=lambda turn: [completed_outbox_event(turn)])
+        store = SQLiteEventStore(tmp_path / "events.sqlite3")
+        supervisor = V4Supervisor(
+            event_store=store,
+            artifact_store=ArtifactStore(tmp_path / "artifacts"),
+            adapter=adapter,
+            adversarial_evaluator=FailingEvaluator(),
+        )
+
+        result = supervisor.run_source_turn(
+            crew_id="c1", goal="test", worker_id="w1",
+            round_id="r1",
+            message="go", expected_marker="<<<DONE>>>",
+        )
+        assert result["status"] == "turn_completed"
