@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from codex_claude_orchestrator.crew.decision_policy import CrewDecisionPolicy
 from codex_claude_orchestrator.crew.gates import WriteScopeGate
@@ -14,7 +14,6 @@ from codex_claude_orchestrator.crew.scope import scope_covers_all as _scope_cove
 from codex_claude_orchestrator.crew.review_verdict import ReviewVerdict, ReviewVerdictParser
 from codex_claude_orchestrator.v4.event_store_protocol import EventStore
 from codex_claude_orchestrator.v4.events import AgentEvent
-from codex_claude_orchestrator.v4.learning_projection import LearningProjection
 from codex_claude_orchestrator.v4.merge_inputs import V4MergeInputRecorder
 from codex_claude_orchestrator.v4.paths import V4Paths
 from codex_claude_orchestrator.v4.planner import PlannerPolicy
@@ -23,6 +22,12 @@ from codex_claude_orchestrator.v4.runtime import WorkerSpec
 from codex_claude_orchestrator.v4.subtask import SubTask
 from codex_claude_orchestrator.v4.workflow import V4WorkflowEngine
 from codex_claude_orchestrator.workers.selection import WorkerSelectionPolicy
+
+
+class WorkerContext(TypedDict, total=False):
+    worker_quality_scores: dict[str, int]
+    active_skill_refs: list[str]
+    active_guardrail_refs: list[str]
 
 
 class V4CrewRunner:
@@ -145,11 +150,11 @@ class V4CrewRunner:
             details = self._controller.status(repo_root=repo_root, crew_id=crew_id)
             goal = details.get("crew", {}).get("root_goal", "")
             repo_report = self._repo_intelligence.analyze(repo_root=repo_root, goal=goal)
-            learning_projection = LearningProjection.from_events(self._events.list_stream(crew_id))
+            worker_context: WorkerContext = {}
             source_worker = self._source_worker(
                 details,
                 requested_write_scope=repo_report.write_scope,
-                worker_quality_scores=learning_projection.worker_quality_scores,
+                worker_quality_scores=worker_context.get("worker_quality_scores", {}),
             )
             if source_worker is None and dynamic:
                 source_worker = self._spawn_source_worker(
@@ -159,7 +164,7 @@ class V4CrewRunner:
                     details=details,
                     requested_write_scope=repo_report.write_scope,
                     repo_report=repo_report.to_dict(),
-                    learning_projection=learning_projection,
+                    worker_context=worker_context,
                     verification_failures=verification_failures,
                     repair_requests=repair_requests,
                     allow_dirty_base=allow_dirty_base,
@@ -294,7 +299,7 @@ class V4CrewRunner:
                     source_worker=source_worker,
                     changes=changes,
                     repo_report=change_report.to_dict(),
-                    learning_projection=learning_projection,
+                    worker_context=worker_context,
                     allow_dirty_base=allow_dirty_base,
                     cancel_event=cancel_event,
                 )
@@ -449,7 +454,7 @@ class V4CrewRunner:
         details: dict[str, Any],
         requested_write_scope: list[str],
         repo_report: dict[str, Any],
-        learning_projection: LearningProjection,
+        worker_context: WorkerContext,
         verification_failures: list[dict[str, Any]],
         repair_requests: list[str],
         allow_dirty_base: bool,
@@ -471,9 +476,9 @@ class V4CrewRunner:
                 "context_insufficient": False,
                 "repo_write_scope": repo_report.get("write_scope") or self._repo_write_scope(repo_root),
                 "repo_risk_tags": repo_report.get("risk_tags", []),
-                "worker_quality_scores": learning_projection.worker_quality_scores,
-                "active_skill_refs": learning_projection.active_skill_refs,
-                "active_guardrail_refs": learning_projection.active_guardrail_refs,
+                "worker_quality_scores": worker_context.get("worker_quality_scores", {}),
+                "active_skill_refs": worker_context.get("active_skill_refs", []),
+                "active_guardrail_refs": worker_context.get("active_guardrail_refs", []),
             }
         )
         if action.action_type is not DecisionActionType.SPAWN_WORKER or action.contract is None:
@@ -498,13 +503,13 @@ class V4CrewRunner:
         source_worker: dict[str, Any],
         changes: dict[str, Any],
         repo_report: dict[str, Any],
-        learning_projection: LearningProjection,
+        worker_context: WorkerContext,
         allow_dirty_base: bool,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         review_worker = self._review_worker(
             details,
-            worker_quality_scores=learning_projection.worker_quality_scores,
+            worker_quality_scores=worker_context.get("worker_quality_scores", {}),
         )
         events: list[dict[str, Any]] = []
         if review_worker is None:
@@ -515,7 +520,7 @@ class V4CrewRunner:
                 details=details,
                 changes=changes,
                 repo_report=repo_report,
-                learning_projection=learning_projection,
+                worker_context=worker_context,
                 allow_dirty_base=allow_dirty_base,
             )
             events.append(
@@ -620,7 +625,7 @@ class V4CrewRunner:
         details: dict[str, Any],
         changes: dict[str, Any],
         repo_report: dict[str, Any],
-        learning_projection: LearningProjection,
+        worker_context: WorkerContext,
         allow_dirty_base: bool,
     ) -> dict[str, Any]:
         action = self._decision_policy.decide(
@@ -633,9 +638,9 @@ class V4CrewRunner:
                 "review_status": None,
                 "repo_write_scope": repo_report.get("write_scope") or self._repo_write_scope(repo_root),
                 "repo_risk_tags": repo_report.get("risk_tags", []),
-                "worker_quality_scores": learning_projection.worker_quality_scores,
-                "active_skill_refs": learning_projection.active_skill_refs,
-                "active_guardrail_refs": learning_projection.active_guardrail_refs,
+                "worker_quality_scores": worker_context.get("worker_quality_scores", {}),
+                "active_skill_refs": worker_context.get("active_skill_refs", []),
+                "active_guardrail_refs": worker_context.get("active_guardrail_refs", []),
             }
         )
         if action.action_type is not DecisionActionType.SPAWN_WORKER or action.contract is None:

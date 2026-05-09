@@ -106,17 +106,7 @@ def test_projection_rejects_mixed_crew_ids_but_ignores_empty_crew_id():
         CrewProjection.from_events(events)
 
 
-def test_crew_projection_surfaces_learning_blockers(tmp_path):
-    store = SQLiteEventStore(tmp_path / "events.sqlite3")
-    store.append(stream_id="crew-1", type="crew.started", crew_id="crew-1", payload={"goal": "Fix"})
-    store.append(
-        stream_id="crew-1",
-        type="challenge.issued",
-        crew_id="crew-1",
-        payload={"challenge_id": "challenge-1", "severity": "block"},
-    )
-
-    projection = CrewProjection.from_events(store.list_stream("crew-1"))
-
-    assert projection.status == "needs_human"
-    assert projection.learning.has_blocking_challenge is True
+def test_crew_projection_has_no_learning_field():
+    """LearningProjection was removed; CrewProjection no longer has a learning field."""
+    projection = CrewProjection.from_events([])
+    assert not hasattr(projection, "learning")

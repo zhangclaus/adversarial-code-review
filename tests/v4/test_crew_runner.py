@@ -63,7 +63,8 @@ def test_v4_crew_runner_supervise_completes_turn_verifies_and_marks_ready(
     ).exists()
 
 
-def test_v4_crew_runner_prefers_high_quality_compatible_source_worker(tmp_path: Path) -> None:
+def test_v4_crew_runner_ignores_quality_events_since_learning_removed(tmp_path: Path) -> None:
+    """Worker quality events no longer influence selection after LearningProjection removal."""
     store = SQLiteEventStore(tmp_path / "events.sqlite3")
     store.append(
         stream_id="crew-1",
@@ -89,7 +90,7 @@ def test_v4_crew_runner_prefers_high_quality_compatible_source_worker(tmp_path: 
     )
     supervisor = FakeV4Supervisor(
         [
-            {"status": "turn_completed", "turn_id": "round-1-worker-high-source"},
+            {"status": "turn_completed", "turn_id": "round-1-worker-low-source"},
             {"status": "turn_completed", "turn_id": "round-1-worker-review-review"},
         ],
         event_store=store,
@@ -109,7 +110,8 @@ def test_v4_crew_runner_prefers_high_quality_compatible_source_worker(tmp_path: 
     )
 
     assert result["status"] == "ready_for_codex_accept"
-    assert supervisor.turns[0]["worker_id"] == "worker-high"
+    # Without LearningProjection, quality scores are empty so the first compatible worker is selected
+    assert supervisor.turns[0]["worker_id"] == "worker-low"
 
 
 def test_v4_crew_runner_does_not_reuse_incompatible_source_worker(tmp_path: Path) -> None:

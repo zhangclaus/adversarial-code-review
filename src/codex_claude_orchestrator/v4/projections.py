@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from codex_claude_orchestrator.v4.events import AgentEvent
-from codex_claude_orchestrator.v4.learning_projection import LearningProjection
 
 _TERMINAL_CREW_STATUSES = {"ready", "needs_human", "accepted"}
 
@@ -22,7 +21,6 @@ class CrewProjection:
     goal: str = ""
     status: str = "empty"
     turns: dict[str, TurnProjection] = field(default_factory=dict)
-    learning: LearningProjection = field(default_factory=LearningProjection)
 
     def to_dict(self) -> dict:
         return {
@@ -38,19 +36,11 @@ class CrewProjection:
                 }
                 for turn_id, turn in self.turns.items()
             },
-            "learning": {
-                "open_challenge_ids": self.learning.open_challenge_ids,
-                "has_blocking_challenge": self.learning.has_blocking_challenge,
-                "candidate_states": self.learning.candidate_states,
-                "active_skill_refs": self.learning.active_skill_refs,
-                "active_guardrail_refs": self.learning.active_guardrail_refs,
-                "worker_quality_scores": self.learning.worker_quality_scores,
-            },
         }
 
     @classmethod
     def from_events(cls, events: list[AgentEvent]) -> "CrewProjection":
-        projection = cls(learning=LearningProjection.from_events(events))
+        projection = cls()
         for event in events:
             if event.crew_id:
                 if projection.crew_id and event.crew_id != projection.crew_id:
@@ -77,6 +67,4 @@ class CrewProjection:
                 projection.status = "needs_human"
             if event.type == "crew.accepted":
                 projection.status = "accepted"
-        if projection.learning.has_blocking_challenge and projection.status != "accepted":
-            projection.status = "needs_human"
         return projection
