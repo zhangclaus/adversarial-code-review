@@ -26,18 +26,18 @@ def test_server_registers_all_tool_modules():
     registered_names = {tool.name for tool in server._tool_manager.list_tools()}
 
     # Lifecycle tools
-    assert "crew_start" in registered_names
-    assert "crew_stop" in registered_names
-    assert "crew_status" in registered_names
-    assert "crew_spawn" in registered_names
-    assert "crew_stop_worker" in registered_names
     assert "crew_verify" in registered_names
 
     # Decision tools
     assert "crew_accept" in registered_names
-    assert "crew_challenge" in registered_names
 
     # Deleted tools
+    assert "crew_start" not in registered_names
+    assert "crew_stop" not in registered_names
+    assert "crew_status" not in registered_names
+    assert "crew_spawn" not in registered_names
+    assert "crew_stop_worker" not in registered_names
+    assert "crew_challenge" not in registered_names
     assert "crew_run" not in registered_names
     assert "crew_decide" not in registered_names
     assert "crew_blackboard" not in registered_names
