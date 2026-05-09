@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from codex_claude_orchestrator.crew.models import WorkerRole
+from codex_claude_orchestrator.crew.models import CrewRecord, WorkerRole
 from codex_claude_orchestrator.v4.crew_runner import V4CrewRunner
 from codex_claude_orchestrator.v4.event_store import SQLiteEventStore
 from codex_claude_orchestrator.v4.subtask import SubTask
+from tests.v4.test_domain_events import MockEventStore
 
 
 def test_v4_crew_runner_supervise_completes_turn_verifies_and_marks_ready(
@@ -745,6 +746,46 @@ async def test_async_supervise_runs_parallel_round(tmp_path: Path) -> None:
     assert result["runtime"] == "v4-parallel"
     assert subtasks[0].status == "passed"
     assert subtasks[1].status == "passed"
+
+
+class TestNonDynamicPathForwardsParams:
+    def test_non_dynamic_forwards_allow_dirty_base_and_seed_contract(self):
+        """H1: Non-dynamic run() must forward allow_dirty_base and seed_contract."""
+        received_kwargs: dict = {}
+
+        class SpySupervisor:
+            def run_source_turn(self, **kwargs):
+                received_kwargs.update(kwargs)
+                return {"status": "turn_completed", "turn_id": "t1"}
+
+        class SpyController:
+            def start(self, **kwargs):
+                received_kwargs.update(kwargs)
+                return CrewRecord(crew_id="c1", root_goal="test", repo=Path("/tmp"))
+
+        runner = V4CrewRunner(
+            controller=SpyController(),
+            supervisor=SpySupervisor(),
+            event_store=MockEventStore(),
+        )
+        original_supervise = runner.supervise
+
+        def capture_supervise(**kwargs):
+            received_kwargs.update(kwargs)
+            return {"crew_id": "c1", "status": "ready", "runtime": "v4", "rounds": 1, "events": []}
+
+        runner.supervise = capture_supervise
+
+        runner.run(
+            repo_root=Path("/tmp"),
+            goal="test",
+            verification_commands=["echo ok"],
+            spawn_policy="static",
+            allow_dirty_base=True,
+            seed_contract="my-contract",
+        )
+        assert received_kwargs.get("allow_dirty_base") is True
+        assert received_kwargs.get("seed_contract") == "my-contract"
 
 
 class FakeCrew:

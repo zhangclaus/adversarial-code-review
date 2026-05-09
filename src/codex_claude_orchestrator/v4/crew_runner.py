@@ -93,6 +93,8 @@ class V4CrewRunner:
             max_rounds=max_rounds,
             poll_interval_seconds=poll_interval_seconds,
             dynamic=False,
+            allow_dirty_base=allow_dirty_base,
+            seed_contract=seed_contract,
             progress_callback=progress_callback,
             cancel_event=cancel_event,
         )
