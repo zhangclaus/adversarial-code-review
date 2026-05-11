@@ -7,6 +7,7 @@ reviewer -> challenge/refine -> record result -> plan next stage.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import uuid
@@ -347,8 +348,10 @@ class LongTaskSupervisor:
                         input=diff, cwd=self.repo_root,
                         capture_output=True, text=True,
                     )
-            except Exception:
-                pass
+            except subprocess.CalledProcessError as exc:
+                logging.warning(
+                    "git apply failed for worker %s: %s", worker_id, exc.stderr[:200]
+                )
 
     # ------------------------------------------------------------------
     # Sub-agent spawning (placeholder for Task 6)

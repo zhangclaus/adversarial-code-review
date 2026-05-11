@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
+import unittest.mock
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -507,3 +510,30 @@ class TestSpawnSubAgentNoMock:
                 pytest.fail("_spawn_sub_agent still uses MagicMock in production code")
             if isinstance(node, ast.Attribute) and node.attr == "MagicMock":
                 pytest.fail("_spawn_sub_agent still uses MagicMock in production code")
+
+
+class TestMergeStageResultsLogging:
+    def test_logs_warning_on_git_apply_failure(self, caplog):
+        """merge_stage_results should log, not silently swallow, git apply failures."""
+        supervisor = LongTaskSupervisor.__new__(LongTaskSupervisor)
+        supervisor.repo_root = Path("/tmp/test")
+        supervisor._crew_id = "c1"
+
+        mock_controller = MagicMock()
+        mock_pool = MagicMock()
+        mock_pool.worktree_manager.get_diff.return_value = "diff --git a/src/a.py b/src/a.py\n+new line"
+        mock_controller._worker_pool = mock_pool
+        supervisor.controller = mock_controller
+
+        # Patch subprocess.run to raise CalledProcessError
+        with caplog.at_level(logging.WARNING):
+            with unittest.mock.patch(
+                "codex_claude_orchestrator.v4.long_task_supervisor.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "git apply", stderr="merge conflict"),
+            ):
+                supervisor.merge_stage_results(
+                    make_think_result().stages[0],
+                    [{"status": "done", "worker_id": "w1", "changed_files": ["src/a.py"]}],
+                )
+
+        assert any("git apply" in record.message for record in caplog.records)
