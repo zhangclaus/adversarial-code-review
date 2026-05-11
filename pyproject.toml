@@ -3,13 +3,13 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "crew-crucible"
+name = "adversarial-code-review"
 version = "0.1.0"
-description = "Multi-agent coding with adversarial verification. Code through fire."
+description = "Multi-agent adversarial code review for Claude Code. One agent implements, another actively tries to break it."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
-keywords = ["claude", "multi-agent", "orchestration", "mcp", "code-generation"]
+keywords = ["claude", "multi-agent", "code-review", "adversarial", "mcp", "orchestration"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -17,20 +17,20 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Software Development :: Code Generators",
     "Topic :: Software Development :: Testing",
 ]
 dependencies = ["mcp>=1.0.0"]
 
 [project.urls]
-Repository = "https://github.com/zhangclaus/crew-crucible"
-Issues = "https://github.com/zhangclaus/crew-crucible/issues"
+Repository = "https://github.com/zhangclaus/adversarial-code-review"
+Issues = "https://github.com/zhangclaus/adversarial-code-review/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.2"]
 
 [project.scripts]
-orchestrator = "codex_claude_orchestrator.cli:main"
+acr = "codex_claude_orchestrator.cli:main"
+acr-mcp = "codex_claude_orchestrator.mcp_server.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

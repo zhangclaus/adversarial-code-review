@@ -40,8 +40,11 @@ from codex_claude_orchestrator.workspace.manager import WorkspaceManager
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="orchestrator")
+    parser = argparse.ArgumentParser(prog="acr", description="Multi-agent adversarial code review for Claude Code")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("init", help="Generate .mcp.json for Claude Code integration")
+    subparsers.add_parser("doctor", help="Check local prerequisites")
 
     dispatch = subparsers.add_parser("dispatch", help="Dispatch a task to a worker")
     dispatch.add_argument("--task-id", required=False)
@@ -130,7 +133,6 @@ def build_parser() -> argparse.ArgumentParser:
         if command_name == "stop":
             command.add_argument("--workspace-cleanup", choices=("keep", "remove"), default="keep")
 
-    subparsers.add_parser("doctor", help="Check local orchestrator prerequisites")
     return parser
 
 
@@ -241,6 +243,30 @@ def run_doctor(registry: AgentRegistry) -> dict[str, object]:
     }
 
 
+def handle_init() -> int:
+    """Generate .mcp.json for Claude Code integration."""
+    mcp_json = Path(".mcp.json")
+    if mcp_json.exists():
+        print(f"✓ .mcp.json already exists in {Path.cwd()}")
+        print("  To reconfigure, delete it and run 'acr init' again.")
+        return 0
+
+    config = {
+        "mcpServers": {
+            "adversarial-code-review": {
+                "command": "acr-mcp"
+            }
+        }
+    }
+    mcp_json.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"✓ Created .mcp.json in {Path.cwd()}")
+    print()
+    print("  Next steps:")
+    print("  1. Restart Claude Code to load the MCP server")
+    print("  2. Use crew_run() tool to start adversarial code review")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -254,8 +280,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(f"Unsupported agents command: {args.agent_command}")
 
     if root_command == "doctor":
-        print(json.dumps(run_doctor(registry), ensure_ascii=False))
-        return 0
+        result = run_doctor(registry)
+        print(json.dumps(result, ensure_ascii=False))
+        all_ok = result["python"]["ok"] and result["claude_cli"]["ok"]
+        return 0 if all_ok else 1
+
+    if root_command == "init":
+        return handle_init()
 
     if root_command == "crew":
         return handle_crew_command(args)

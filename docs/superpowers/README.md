@@ -1,6 +1,6 @@
 # Design Docs
 
-本目录保留 codex-claude-orchestrator 的内部设计文档（不包含在开源仓库中）。
+本目录保留 adversarial-code-review 的内部设计文档（不包含在开源仓库中）。
 
 ## 项目文档
 

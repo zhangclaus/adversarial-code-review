@@ -1,6 +1,6 @@
-# Crew Crucible
+# Adversarial Code Review
 
-Multi-agent coding with adversarial verification. Code through fire.
+Multi-agent adversarial code review for Claude Code. One agent implements, another actively tries to break it.
 
 ## The Problem
 
@@ -8,46 +8,69 @@ You ask Claude Code to implement a feature. It writes 500 lines, runs the tests,
 
 **One AI agent reviewing its own work has blind spots.** It optimizes for "make the tests pass," not "find what could go wrong." It won't challenge its own assumptions.
 
-Crew Crucible solves this by pitting multiple Claude CLI instances against each other — one implements, another actively tries to break it. The implementer has to defend its code against a hostile reviewer. Bad code doesn't survive the crucible.
+Adversarial Code Review solves this by pitting multiple Claude CLI instances against each other — one implements, another actively tries to break it. The implementer has to defend its code against a hostile reviewer. Bad code doesn't survive.
 
 ## How It Works
 
 ![Architecture Flow](liuchengtu.png)
 
-**核心流程：**
+1. **User** sends a task request (e.g. "Add user registration with email verification")
+2. **LongTaskSupervisor** drives multi-stage execution:
+   - **Stage 1**: Think — brainstorming and planning
+   - **Stage 2**: PlanAdversary — validate plan quality
+   - **Stage 3**: Do — implement with parallel workers
+   - Each stage: Workers execute → adversarial agent reviews → challenge/repair loop → merge results
+3. **Worktree Isolation** — each worker operates in an independent git worktree
+4. **Event Store** (SQLite) — persists all events for full replay
 
-1. **User** 发送任务请求（如 "Add user registration with email verification"）
-2. **`/run Skill`** — Claude Code 执行 brainstorming，输出结构化的 `think_result.json`
-3. **LongTaskSupervisor**（Python 运行时）驱动多阶段执行：
-   - **Stage 1**: Think → 首次 brainstorming（写入 think_result.json）
-   - **Stage 2**: Brainstorming PlanAdversary → 验证计划质量
-   - **Stage 3**: Planning → 首次实现
-   - 每个阶段：Worker 并行执行 → adversarial agent 审查 → challenge/repair 循环 → merge stage results
-4. **Worktree Isolation** — 每个 Worker 在独立的 git worktree 中工作，互不干扰
-5. **Event Store**（SQLite）— 持久化所有事件，支持完整回放
-
-The key insight: **the Reviewer is adversarial**. It doesn't just check "do tests pass?" — it looks for edge cases, race conditions, security holes, and architectural problems. When it finds issues, it emits targeted challenges to specific workers. The Implementer must fix them and prove the fix works. This cycle repeats up to 3 rounds.
+The key insight: **the Reviewer is adversarial**. It doesn't just check "do tests pass?" — it looks for edge cases, race conditions, security holes, and architectural problems. When it finds issues, it emits targeted challenges to specific workers. The Implementer must fix them and prove the fix works.
 
 ## Why Multiple Agents?
 
-| Single Claude CLI | Crew Crucible |
+| Single Claude CLI | Adversarial Code Review |
 |---|---|
 | Reviews its own code (blind spots) | Separate reviewer with fresh context |
 | One long context window (polluted) | Isolated contexts per role |
 | Sequential: write → test → done | Adversarial: write → attack → defend → verify |
 | "Tests pass, ship it" | "Tests pass, but what about X?" |
 
-## Features
+## Quick Start
 
-- **Adversarial Verification** — Reviewer actively attacks code; Implementer defends; up to 3 challenge/repair rounds
-- **Long Task Supervisor** — Multi-stage execution with dynamic planning for complex, multi-hour tasks
-- **Git Worktree Isolation** — Each worker gets an independent worktree; no file conflicts
-- **Event-Sourced Audit Trail** — Every state change recorded in SQLite; full replay capability
-- **Blackboard Pattern** — Workers share facts, claims, risks, and patches through typed entries
-- **Safety Policy Gate** — Blocks destructive commands, shell injection, sensitive path access
-- **MCP Server** — Integrates with Claude Code as native MCP tools
-- **Non-blocking Jobs** — `crew_run` returns immediately; delta-status polling minimizes context usage
-- **Parallel Subtasks** — Multiple workers execute concurrently with adversarial review
+### Install
+
+```bash
+pip install adversarial-code-review
+
+# Verify prerequisites
+acr doctor
+```
+
+### Claude Code Integration (MCP)
+
+```bash
+# Auto-generate .mcp.json
+acr init
+
+# Restart Claude Code, then use:
+crew_run(repo="/path/to/project", goal="Refactor auth module")
+```
+
+### CLI
+
+```bash
+# Run adversarial code review
+acr crew run \
+  --repo /path/to/your/project \
+  --goal "Add user registration with email verification" \
+  --verification-command "pytest" \
+  --max-rounds 3
+
+# Check status
+acr crew status --repo /path/to/your/project
+
+# Accept results
+acr crew accept --repo /path/to/your/project
+```
 
 ## Requirements
 
@@ -55,140 +78,37 @@ The key insight: **the Reviewer is adversarial**. It doesn't just check "do test
 - [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) (Anthropic's Claude Code)
 - tmux
 
-## Installation
+## Features
 
-```bash
-# Clone
-git clone https://github.com/zhangclaus/crew-crucible.git
-cd crew-crucible
+- **Adversarial Verification** — Reviewer actively attacks code; Implementer defends; up to 3 challenge/repair rounds
+- **Long Task Supervisor** — Multi-stage execution with dynamic planning for complex tasks
+- **Git Worktree Isolation** — Each worker gets an independent worktree; no file conflicts
+- **Event-Sourced Audit Trail** — Every state change recorded in SQLite; full replay capability
+- **MCP Server** — Integrates with Claude Code as native MCP tools
+- **Non-blocking Jobs** — `crew_run` returns immediately; delta-status polling minimizes context usage
+- **Parallel Subtasks** — Multiple workers execute concurrently with adversarial review
 
-# Install
-pip install -e .
+## CLI Commands
 
-# Or with dev dependencies
-pip install -e ".[dev]"
-
-# Verify prerequisites
-orchestrator doctor
-```
-
-## Quick Start
-
-### CLI
-
-```bash
-# Run a crew with full supervision loop (agent-only adversarial review)
-orchestrator crew run \
-  --repo /path/to/your/project \
-  --goal "Add user registration with email verification" \
-  --max-rounds 3
-
-# Optionally add external verification commands
-orchestrator crew run \
-  --repo /path/to/your/project \
-  --goal "Add user registration with email verification" \
-  --verification-command "pytest" \
-  --max-rounds 3
-
-# Check status
-orchestrator crew status --repo /path/to/your/project
-
-# Accept results when ready
-orchestrator crew accept --repo /path/to/your/project
-```
-
-### MCP Server (Claude Code Integration)
-
-Add to your `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "crew-crucible": {
-      "command": "python",
-      "args": ["-m", "codex_claude_orchestrator.mcp_server"]
-    }
-  }
-}
-```
-
-Then use from Claude Code:
-
-```
-crew_run(repo="/path/to/project", goal="Refactor auth module")
-crew_job_status(job_id="job-abc123")
-crew_accept(crew_id="crew-xyz")
-```
+| Command | Description |
+|---------|-------------|
+| `acr init` | Generate `.mcp.json` for Claude Code |
+| `acr doctor` | Check prerequisites (Python, Claude CLI, tmux) |
+| `acr crew run` | Start adversarial code review |
+| `acr crew status` | Show crew status |
+| `acr crew accept` | Accept crew results |
+| `acr crew stop` | Stop all workers |
+| `acr crew verify` | Run verification command |
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `crew_run` | Start a non-blocking crew job (returns `job_id`) |
-| `crew_job_status` | Poll job status with delta tracking (only returns changes) |
+| `crew_run` | Start a non-blocking review job (returns `job_id`) |
+| `crew_job_status` | Poll job status with delta tracking |
 | `crew_cancel` | Cancel a running job |
-| `crew_verify` | Manually run a verification command (optional, for ad-hoc checks) |
-| `crew_accept` | Accept and finalize crew results |
-
-## CLI Commands
-
-```
-orchestrator crew run       # Start a crew with supervision loop
-orchestrator crew status    # Show crew status
-orchestrator crew accept    # Accept crew results
-orchestrator crew stop      # Stop all workers
-orchestrator crew verify    # Run verification
-orchestrator doctor         # Check prerequisites
-```
-
-## How It Works
-
-1. **Dispatch** — `crew_run` spawns workers in tmux panes with role-specific prompts
-2. **Execute** — Workers operate in isolated git worktrees, writing code within their assigned scope
-3. **Review** — Reviewer reads changes, runs tests, emits a verdict (pass/challenge/replan)
-4. **Challenge** — If issues found, specific workers get targeted fix instructions
-5. **Verify** — Verification commands (pytest, ruff, etc.) run against the merged result
-6. **Accept** — On success, worktrees merge into the main branch
-
-Every step is recorded as an immutable event in the SQLite event store. You can replay the full history with `crew_state_projection`.
-
-## Project Structure
-
-```
-src/codex_claude_orchestrator/
-├── core/              # Domain models, safety policy gate
-├── crew/              # CrewController, worker contracts, merge arbitration
-├── v4/                # Event-sourced runtime (primary)
-│   ├── event_store.py # SQLite event store
-│   ├── crew_runner.py # Main orchestration loop
-│   ├── supervisor.py  # V4 supervisor facade
-│   ├── parallel_supervisor.py    # Parallel subtask execution
-│   ├── long_task_supervisor.py   # Multi-stage long task execution
-│   └── adapters/      # tmux Claude adapter
-├── mcp_server/        # MCP server (FastMCP, stdio transport)
-├── runtime/           # tmux session management
-├── workspace/         # Git worktree management
-├── messaging/         # Worker-to-worker communication
-└── state/             # Blackboard, recorders
-
-skills/
-└── orchestration-default.md  # Orchestration protocol (editable)
-```
-
-## Configuration
-
-The orchestration protocol is defined in `skills/orchestration-default.md`. Key settings:
-
-- **Worker templates** — `targeted-code-editor`, `repo-context-scout`, `patch-risk-auditor`, etc.
-- **Max rounds** — Challenge/repair iterations before escalation (default: 3)
-- **Poll interval** — How often to check worker status (adaptive: 5s → 60s)
-- **Write scope** — File paths each worker is allowed to modify
-
-Environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `V4_EVENT_STORE_BACKEND` | `sqlite` | Event store backend (`sqlite` or `postgres`) |
+| `crew_verify` | Run a verification command |
+| `crew_accept` | Accept and finalize results |
 
 ## Testing
 
@@ -199,20 +119,7 @@ pytest
 # Run specific module tests
 pytest tests/v4/ -v
 pytest tests/mcp_server/ -v
-
-# Run with coverage
-pytest --cov=codex_claude_orchestrator
 ```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feat/my-feature`)
-3. Write tests first (TDD)
-4. Implement the feature
-5. Run tests (`pytest`)
-6. Commit with conventional commits (`feat:`, `fix:`, `test:`, `docs:`)
-7. Open a Pull Request
 
 ## License
 

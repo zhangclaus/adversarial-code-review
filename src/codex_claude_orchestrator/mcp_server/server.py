@@ -8,7 +8,7 @@ from codex_claude_orchestrator.mcp_server.tools.crew_run import register_run_too
 
 
 def create_server(controller=None, job_manager=None) -> FastMCP:
-    server = FastMCP("crew-orchestrator")
+    server = FastMCP("adversarial-code-review")
 
     if controller is not None:
         register_lifecycle_tools(server, controller)
