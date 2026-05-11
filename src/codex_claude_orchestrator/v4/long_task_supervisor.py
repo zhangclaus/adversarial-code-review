@@ -22,8 +22,6 @@ from codex_claude_orchestrator.v4.long_task_models import (
     SubTaskRef,
     ThinkResult,
 )
-from codex_claude_orchestrator.v4.subtask import SubTask
-
 
 class LongTaskSupervisor:
     """Orchestrates long task execution with multi-stage adversarial verification.
@@ -52,6 +50,7 @@ class LongTaskSupervisor:
         verification_commands: list[str],
         max_rounds: int = 3,
         prompt_dir: Path | None = None,
+        crew_id: str = "",
     ) -> None:
         self.controller = controller
         self.supervisor = supervisor
@@ -61,7 +60,7 @@ class LongTaskSupervisor:
         self.verification_commands = verification_commands
         self.max_rounds = max_rounds
         self.prompt_dir = prompt_dir or Path(".claude/prompts")
-        self._crew_id: str = ""
+        self._crew_id: str = crew_id
 
     # ------------------------------------------------------------------
     # ThinkResult validation
@@ -306,10 +305,7 @@ class LongTaskSupervisor:
 
     def _read_worker_outbox(self, worker_id: str) -> Any:
         """Read worker's structured output from outbox."""
-        # Placeholder -- will be implemented with actual outbox reading
-        from unittest.mock import MagicMock
-
-        return MagicMock(changed_files=[], success=True)
+        raise NotImplementedError("Implement _read_worker_outbox with actual outbox reading")
 
     # ------------------------------------------------------------------
     # Merge
@@ -355,11 +351,13 @@ class LongTaskSupervisor:
     # Main loop
     # ------------------------------------------------------------------
 
-    def supervise_long_task(self) -> dict[str, Any]:
+    def supervise_long_task(self, crew_id: str = "") -> dict[str, Any]:
         """Main long task supervision loop.
 
         Returns a summary dict with final status.
         """
+        self._crew_id = crew_id or self._crew_id
+
         # Phase 1: Load brainstorming output
         think_result_path = self.repo_root / ".crew" / "think_result.json"
         think_result = self.load_and_validate_think_result(think_result_path)
@@ -397,7 +395,9 @@ class LongTaskSupervisor:
                 elif review.action == "challenge":
                     if review.challenge_targets:
                         self.challenge_parallel_workers(review.challenge_targets)
-                        sub_task_results = self._get_updated_results(stage)
+                        # TODO: get_active_turns / get_updated_results need WorkerPool integration
+                        active_turns = self.get_active_turns(stage)
+                        sub_task_results = self.get_updated_results(stage, active_turns)
                         review = self.run_reviewer(stage, sub_task_results, briefing)
                 elif review.action == "replan":
                     remaining = self.replan_remaining_stages(
@@ -467,7 +467,7 @@ class LongTaskSupervisor:
 
     def _get_updated_results(self, stage: StagePlan) -> list[Any]:
         """Get updated results after challenge rounds."""
-        return []
+        raise NotImplementedError("Implement with WorkerPool integration")
 
     def _run_final_verification(self) -> None:
         """Run final verification commands (pytest full suite)."""
