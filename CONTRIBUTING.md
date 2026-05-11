@@ -5,8 +5,8 @@ Thanks for your interest in contributing! Here's how to get started.
 ## Setup
 
 ```bash
-git clone https://github.com/zhangzhang123/codex-claude-orchestrator.git
-cd codex-claude-orchestrator
+git clone https://github.com/zhangclaus/crew-crucible.git
+cd crew-crucible
 pip install -e ".[dev]"
 ```
 

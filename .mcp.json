@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "crew-orchestrator": {
+    "crew-crucible": {
       "command": "python",
       "args": ["-m", "codex_claude_orchestrator.mcp_server"],
       "env": {

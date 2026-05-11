@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codex-claude-orchestrator"
+name = "crew-crucible"
 version = "0.1.0"
-description = "Local multi-agent orchestration system for Claude Code workers with adversarial verification"
+description = "Multi-agent coding with adversarial verification. Code through fire."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
@@ -23,8 +23,8 @@ classifiers = [
 dependencies = ["mcp>=1.0.0"]
 
 [project.urls]
-Repository = "https://github.com/zhangclaus/codex-claude-orchestrator"
-Issues = "https://github.com/zhangclaus/codex-claude-orchestrator/issues"
+Repository = "https://github.com/zhangclaus/crew-crucible"
+Issues = "https://github.com/zhangclaus/crew-crucible/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.2"]

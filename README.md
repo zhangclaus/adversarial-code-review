@@ -1,4 +1,6 @@
-# Codex Claude Orchestrator
+# Crew Crucible
+
+Multi-agent coding with adversarial verification. Code through fire.
 
 A local, multi-agent orchestration system for Claude Code. Coordinates multiple Claude CLI workers in isolated tmux sessions with adversarial verification, event-sourced state management, and safety policy gating.
 
@@ -48,8 +50,8 @@ The Supervisor is not a framework primitive — it's just another Claude CLI age
 
 ```bash
 # Clone
-git clone https://github.com/<your-org>/codex-claude-orchestrator.git
-cd codex-claude-orchestrator
+git clone https://github.com/zhangclaus/crew-crucible.git
+cd crew-crucible
 
 # Install
 pip install -e .
@@ -87,7 +89,7 @@ Add to your `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "crew-orchestrator": {
+    "crew-crucible": {
       "command": "python",
       "args": ["-m", "codex_claude_orchestrator.mcp_server"]
     }
