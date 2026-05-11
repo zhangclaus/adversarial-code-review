@@ -12,29 +12,19 @@ Crew Crucible solves this by pitting multiple Claude CLI instances against each 
 
 ## How It Works
 
-```
-You: "Add user registration with email verification"
-                    |
-                    v
-          Supervisor (Claude CLI + MCP)
-           /        |        \
-          v         v         v
-     Explorer   Implementer   Reviewer
-     (scout)    (writes code)  (tries to break it)
-                    |              |
-                    +--- conflict -+
-                    |
-              Challenge/Repair loop
-              (up to 3 rounds)
-                    |
-                    v
-              pytest passes?
-                 /    \
-               yes     no → fix & retry
-                |
-                v
-           Merge to main
-```
+![Architecture Flow](liuchengtu.png)
+
+**核心流程：**
+
+1. **User** 发送任务请求（如 "Add user registration with email verification"）
+2. **`/run Skill`** — Claude Code 执行 brainstorming，输出结构化的 `think_result.json`
+3. **LongTaskSupervisor**（Python 运行时）驱动多阶段执行：
+   - **Stage 1**: Think → 首次 brainstorming（写入 think_result.json）
+   - **Stage 2**: Brainstorming PlanAdversary → 验证计划质量
+   - **Stage 3**: Planning → 首次实现
+   - 每个阶段：Worker 并行执行 → adversarial agent 审查 → challenge/repair 循环 → merge stage results
+4. **Worktree Isolation** — 每个 Worker 在独立的 git worktree 中工作，互不干扰
+5. **Event Store**（SQLite）— 持久化所有事件，支持完整回放
 
 The key insight: **the Reviewer is adversarial**. It doesn't just check "do tests pass?" — it looks for edge cases, race conditions, security holes, and architectural problems. When it finds issues, it emits targeted challenges to specific workers. The Implementer must fix them and prove the fix works. This cycle repeats up to 3 rounds.
 
