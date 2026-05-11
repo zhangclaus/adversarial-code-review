@@ -382,6 +382,12 @@ class ReviewVerdict:
             stage_summary=data.get("stage_summary", ""),
         )
 
+    @classmethod
+    def from_json(cls, text: str) -> ReviewVerdict:
+        """Parse ReviewVerdict from a JSON string."""
+        data = json.loads(text)
+        return cls.from_dict(data)
+
 
 # --- Plan adversary verdict ---
 
@@ -474,3 +480,9 @@ class PlanAdversaryVerdict:
             auto_fixes=[AutoFix.from_dict(a) for a in data.get("auto_fixes", [])],
             summary=data.get("summary", ""),
         )
+
+    @classmethod
+    def from_json(cls, text: str) -> PlanAdversaryVerdict:
+        """Parse PlanAdversaryVerdict from a JSON string."""
+        data = json.loads(text)
+        return cls.from_dict(data)
