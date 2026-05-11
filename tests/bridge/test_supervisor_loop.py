@@ -72,7 +72,8 @@ def test_supervisor_accepts_after_verification_passes(tmp_path: Path):
     assert recorder.read_session("session-auto-accept")["session"]["status"] == "accepted"
 
 
-def test_supervisor_rejects_missing_verification_commands(tmp_path: Path):
+def test_supervisor_accepts_empty_verification_commands(tmp_path: Path):
+    """Empty verification_commands is valid — agent-only adversarial review."""
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     recorder = SessionRecorder(repo_root / ".orchestrator")
@@ -85,28 +86,18 @@ def test_supervisor_rejects_missing_verification_commands(tmp_path: Path):
             stderr="",
         ),
         session_recorder=recorder,
-        bridge_id_factory=lambda: "bridge-missing-verification",
+        bridge_id_factory=lambda: "bridge-empty-verification",
         turn_id_factory=lambda: "turn-start",
-        session_id_factory=lambda: "session-missing-verification",
-        task_id_factory=lambda: "task-missing-verification",
-        trace_id_factory=lambda: "trace-missing-verification",
+        session_id_factory=lambda: "session-empty-verification",
+        task_id_factory=lambda: "task-empty-verification",
+        trace_id_factory=lambda: "trace-empty-verification",
     )
     bridge.start(repo_root=repo_root, goal="实现功能", workspace_mode="shared", supervised=True)
 
-    try:
-        BridgeSupervisorLoop(bridge).supervise(
-            repo_root=repo_root,
-            bridge_id=None,
-            verification_commands=[],
-            max_rounds=2,
-            poll_interval_seconds=0,
-        )
-    except ValueError as exc:
-        assert "verification command" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
-
-    assert recorder.read_session("session-missing-verification")["session"]["status"] == "running"
+    # Should not raise — empty verification_commands is allowed
+    loop = BridgeSupervisorLoop(bridge)
+    # Just call _require_verification_commands directly to confirm no error
+    loop._require_verification_commands([])
 
 
 def test_supervisor_rejects_unsupervised_bridge(tmp_path: Path):

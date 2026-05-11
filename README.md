@@ -77,7 +77,13 @@ orchestrator doctor
 ### CLI
 
 ```bash
-# Run a crew with full supervision loop
+# Run a crew with full supervision loop (agent-only adversarial review)
+orchestrator crew run \
+  --repo /path/to/your/project \
+  --goal "Add user registration with email verification" \
+  --max-rounds 3
+
+# Optionally add external verification commands
 orchestrator crew run \
   --repo /path/to/your/project \
   --goal "Add user registration with email verification" \
@@ -109,7 +115,7 @@ Add to your `.mcp.json`:
 Then use from Claude Code:
 
 ```
-crew_run(repo="/path/to/project", goal="Refactor auth module", verification_commands=["pytest"])
+crew_run(repo="/path/to/project", goal="Refactor auth module")
 crew_job_status(job_id="job-abc123")
 crew_accept(crew_id="crew-xyz")
 ```
@@ -121,7 +127,7 @@ crew_accept(crew_id="crew-xyz")
 | `crew_run` | Start a non-blocking crew job (returns `job_id`) |
 | `crew_job_status` | Poll job status with delta tracking (only returns changes) |
 | `crew_cancel` | Cancel a running job |
-| `crew_verify` | Run a verification command (pytest, ruff, etc.) |
+| `crew_verify` | Manually run a verification command (optional, for ad-hoc checks) |
 | `crew_accept` | Accept and finalize crew results |
 
 ## CLI Commands

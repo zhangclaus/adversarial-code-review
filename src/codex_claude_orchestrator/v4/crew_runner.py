@@ -152,8 +152,7 @@ class V4CrewRunner:
         progress_callback: Callable[[str, int, int], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
-        if not verification_commands:
-            raise ValueError("at least one verification command is required")
+        # verification_commands may be empty — agent-only adversarial review
 
         def _progress(phase: str, round_index: int) -> None:
             if progress_callback is not None:

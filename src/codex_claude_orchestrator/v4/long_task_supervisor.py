@@ -571,6 +571,8 @@ class LongTaskSupervisor:
 
     def _run_final_verification(self) -> None:
         """Run final verification commands."""
+        if not self.verification_commands:
+            return
         for command in self.verification_commands:
             result = subprocess.run(
                 command, shell=True, cwd=self.repo_root,

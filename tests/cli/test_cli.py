@@ -418,7 +418,7 @@ def test_main_crew_accept_routes_to_v4_merge_transaction(tmp_path: Path, monkeyp
     assert fake_controller.calls == []
 
 
-def test_main_crew_accept_without_verification_command_is_blocked(
+def test_main_crew_accept_without_verification_command_succeeds(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -428,8 +428,8 @@ def test_main_crew_accept_without_verification_command_is_blocked(
     fake_transaction = FakeV4MergeTransaction(
         {
             "crew_id": "crew-cli",
-            "status": "blocked",
-            "reason": "verification command required",
+            "status": "accepted",
+            "summary": "accepted",
         }
     )
     monkeypatch.setattr("codex_claude_orchestrator.cli.build_crew_controller", lambda repo_root: fake_controller)
@@ -455,10 +455,8 @@ def test_main_crew_accept_without_verification_command_is_blocked(
 
     payload = json.loads(stdout.getvalue())
     assert exit_code == 0
-    assert payload["status"] == "blocked"
-    assert payload["reason"] == "verification command required"
+    assert payload["status"] == "accepted"
     assert fake_transaction.calls[0]["verification_commands"] == []
-    assert fake_controller.calls == []
 
 
 def test_main_crew_run_routes_to_v4_crew_runner_by_default(

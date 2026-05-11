@@ -201,8 +201,8 @@ class BridgeSupervisorLoop:
         )
 
     def _require_verification_commands(self, verification_commands: list[str]) -> None:
-        if not any(command.strip() for command in verification_commands):
-            raise ValueError("at least one verification command is required for bridge auto-supervision")
+        # verification_commands may be empty — agent-only adversarial review
+        pass
 
     def _require_supervised_snapshot(self, snapshot: dict[str, Any]) -> None:
         bridge = snapshot["bridge"]

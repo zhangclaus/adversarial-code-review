@@ -64,8 +64,7 @@ class V4MergeTransaction:
         summary: str,
         verification_commands: list[str],
     ) -> dict:
-        if not verification_commands:
-            return self._blocked(crew_id, reason="verification command required")
+        # verification_commands may be empty — agent-only adversarial review
 
         readiness = AcceptReadinessGate(self._events).evaluate(crew_id)
         if not readiness.allowed:
@@ -336,6 +335,8 @@ class V4MergeTransaction:
         return path
 
     def _run_verification(self, commands: list[str], *, cwd: Path) -> list[dict]:
+        if not commands:
+            return []
         results = []
         for index, command in enumerate(commands, start=1):
             try:

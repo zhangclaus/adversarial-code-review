@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     crew_run.add_argument("--mode", choices=("auto", "quick", "standard", "full"), default="auto")
     crew_run.add_argument("--spawn-policy", choices=("dynamic", "static"), default="dynamic")
     crew_run.add_argument("--seed-contract", required=False)
-    crew_run.add_argument("--verification-command", action="append", required=True)
+    crew_run.add_argument("--verification-command", action="append", default=[])
     crew_run.add_argument("--max-rounds", type=int, default=3)
     crew_run.add_argument("--poll-interval", type=float, default=1800.0)
     crew_run.add_argument("--poll-retries", type=int, default=3)

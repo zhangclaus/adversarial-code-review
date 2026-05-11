@@ -104,7 +104,7 @@ class JobManager:
                         crew_id=crew_id or f"crew-{job_id}",
                         goal=goal,
                         subtasks=parsed,
-                        verification_commands=verification_commands or ["echo ok"],
+                        verification_commands=verification_commands or [],
                         max_rounds=max_rounds,
                         max_workers=max_workers,
                         progress_callback=lambda phase, round_idx, _max: self._on_progress(
@@ -116,7 +116,7 @@ class JobManager:
                     result = runner.supervise(
                         repo_root=repo_root,
                         crew_id=crew_id,
-                        verification_commands=verification_commands or ["echo ok"],
+                        verification_commands=verification_commands or [],
                         max_rounds=max_rounds,
                         progress_callback=lambda phase, round_idx, _max: self._on_progress(
                             job_id, phase, round_idx
@@ -127,7 +127,7 @@ class JobManager:
                     run_kwargs: dict[str, Any] = dict(
                         repo_root=repo_root,
                         goal=goal,
-                        verification_commands=verification_commands or ["echo ok"],
+                        verification_commands=verification_commands or [],
                         max_rounds=max_rounds,
                         progress_callback=lambda phase, round_idx, _max: self._on_progress(
                             job_id, phase, round_idx
