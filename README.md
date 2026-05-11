@@ -2,43 +2,62 @@
 
 Multi-agent coding with adversarial verification. Code through fire.
 
-A local, multi-agent orchestration system for Claude Code. Coordinates multiple Claude CLI workers in isolated tmux sessions with adversarial verification, event-sourced state management, and safety policy gating.
+## The Problem
 
-## Why
+You ask Claude Code to implement a feature. It writes 500 lines, runs the tests, says "done." You merge it. Two days later you find a subtle race condition it never considered.
 
-Complex software tasks benefit from multiple AI agents working in parallel — one explores the codebase, another implements, a third reviews. But coordinating them requires isolation (so they don't overwrite each other), verification (so bad code doesn't ship), and auditability (so you know what happened). This system provides all three.
+**One AI agent reviewing its own work has blind spots.** It optimizes for "make the tests pass," not "find what could go wrong." It won't challenge its own assumptions.
 
-## Architecture
+Crew Crucible solves this by pitting multiple Claude CLI instances against each other — one implements, another actively tries to break it. The implementer has to defend its code against a hostile reviewer. Bad code doesn't survive the crucible.
+
+## How It Works
 
 ```
-Supervisor Agent (Claude CLI in tmux + MCP Tools + Orchestration Skill)
-    |
-    | MCP protocol (stdio)
-    v
-MCP Server (Python, FastMCP)
-    |
-    v
-CrewController / WorkerPool / Blackboard / EventStore
-    |
-    +-- tmux Worker A (Claude CLI) — explorer
-    +-- tmux Worker B (Claude CLI) — implementer (git worktree)
-    +-- tmux Worker C (Claude CLI) — reviewer
+You: "Add user registration with email verification"
+                    |
+                    v
+          Supervisor (Claude CLI + MCP)
+           /        |        \
+          v         v         v
+     Explorer   Implementer   Reviewer
+     (scout)    (writes code)  (tries to break it)
+                    |              |
+                    +--- conflict -+
+                    |
+              Challenge/Repair loop
+              (up to 3 rounds)
+                    |
+                    v
+              pytest passes?
+                 /    \
+               yes     no → fix & retry
+                |
+                v
+           Merge to main
 ```
 
-The Supervisor is not a framework primitive — it's just another Claude CLI agent with MCP tools. Orchestration logic lives in Markdown prompt files, not Python code. Changing the orchestration strategy means editing a `.md` file.
+The key insight: **the Reviewer is adversarial**. It doesn't just check "do tests pass?" — it looks for edge cases, race conditions, security holes, and architectural problems. When it finds issues, it emits targeted challenges to specific workers. The Implementer must fix them and prove the fix works. This cycle repeats up to 3 rounds.
+
+## Why Multiple Agents?
+
+| Single Claude CLI | Crew Crucible |
+|---|---|
+| Reviews its own code (blind spots) | Separate reviewer with fresh context |
+| One long context window (polluted) | Isolated contexts per role |
+| Sequential: write → test → done | Adversarial: write → attack → defend → verify |
+| "Tests pass, ship it" | "Tests pass, but what about X?" |
 
 ## Features
 
-- **Multi-Agent Crew Orchestration** — Role-based workers (explorer, implementer, reviewer) in isolated tmux panes
-- **Adversarial Verification Loop** — Spawn → observe → verify → challenge/repair, up to 3 retries
-- **Event-Sourced Runtime** — All state changes stored as immutable events in SQLite; full audit trail via CQRS projections
-- **Git Worktree Isolation** — Each implementer gets an independent worktree; no file conflicts between workers
-- **Blackboard Pattern** — Workers share information through typed entries (fact, claim, risk, patch, verification)
-- **Safety Policy Gate** — Blocks destructive commands (`rm -rf`, `git reset --hard`), shell injection, and sensitive path access
-- **MCP Server** — Exposes orchestration as MCP tools for Claude Code integration
+- **Adversarial Verification** — Reviewer actively attacks code; Implementer defends; up to 3 challenge/repair rounds
+- **Long Task Supervisor** — Multi-stage execution with dynamic planning for complex, multi-hour tasks
+- **Git Worktree Isolation** — Each worker gets an independent worktree; no file conflicts
+- **Event-Sourced Audit Trail** — Every state change recorded in SQLite; full replay capability
+- **Blackboard Pattern** — Workers share facts, claims, risks, and patches through typed entries
+- **Safety Policy Gate** — Blocks destructive commands, shell injection, sensitive path access
+- **MCP Server** — Integrates with Claude Code as native MCP tools
 - **Non-blocking Jobs** — `crew_run` returns immediately; delta-status polling minimizes context usage
-- **Parallel Subtasks** — Concurrent worker execution with two-layer adversarial review
-- **Long Task Supervisor** — Multi-stage execution with dynamic planning for complex, long-running tasks
+- **Parallel Subtasks** — Multiple workers execute concurrently with adversarial review
 
 ## Requirements
 
