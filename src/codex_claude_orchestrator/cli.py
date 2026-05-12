@@ -258,7 +258,7 @@ def handle_init() -> int:
 
     config = {
         "mcpServers": {
-            "adversarial-code-review": {
+            "agent-crucible": {
                 "command": "acr-mcp"
             }
         }

@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "adversarial-code-review": {
+    "agent-crucible": {
       "command": "acr-mcp",
       "env": {
         "V4_EVENT_STORE_BACKEND": "sqlite"

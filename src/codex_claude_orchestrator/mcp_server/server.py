@@ -9,7 +9,7 @@ from codex_claude_orchestrator.mcp_server.tools.crew_context import register_con
 
 
 def create_server(controller=None, job_manager=None) -> FastMCP:
-    server = FastMCP("adversarial-code-review")
+    server = FastMCP("agent-crucible")
 
     if controller is not None:
         register_lifecycle_tools(server, controller)

@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "adversarial-code-review"
+name = "agent-crucible"
 version = "0.1.0"
-description = "Multi-agent adversarial code review for Claude Code. One agent implements, another actively tries to break it."
+description = "Multi-agent code review with adversarial verification for Claude Code."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
@@ -22,8 +22,8 @@ classifiers = [
 dependencies = ["mcp>=1.0.0"]
 
 [project.urls]
-Repository = "https://github.com/zhangclaus/adversarial-code-review"
-Issues = "https://github.com/zhangclaus/adversarial-code-review/issues"
+Repository = "https://github.com/zhangclaus/agent-crucible"
+Issues = "https://github.com/zhangclaus/agent-crucible/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.2"]

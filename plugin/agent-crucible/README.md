@@ -1,20 +1,20 @@
-# Adversarial Code Review Plugin for Claude Code
+# Agent Crucible Plugin for Claude Code
 
-Multi-agent adversarial code review. One agent implements, another actively tries to break it.
+Multi-agent code review with adversarial verification. One agent implements, another actively tries to break it.
 
 ## Installation
 
 ```bash
-claude plugin install adversarial-code-review
+claude plugin install agent-crucible
 ```
 
 Or manually:
 1. Clone this repository
-2. Copy `plugin/adversarial-code-review/` to `~/.claude/plugins/adversarial-code-review/`
+2. Copy `plugin/agent-crucible/` to `~/.claude/plugins/agent-crucible/`
 
 ## What You Get
 
-- `/adversarial-review` skill for code review
+- `/agent-crucible` skill for code review
 - MCP tools for multi-agent orchestration
 - Worker templates for common roles
 - Supervisor mode for direct control

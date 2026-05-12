@@ -1,9 +1,9 @@
 ---
-name: adversarial-review
-description: "Multi-agent adversarial code review. One agent implements, another actively tries to break it."
+name: agent-crucible
+description: "Multi-agent code review with adversarial verification. One agent implements, another actively tries to break it."
 ---
 
-# Adversarial Code Review
+# Agent Crucible
 
 Use this skill when you need thorough code review with adversarial verification.
 

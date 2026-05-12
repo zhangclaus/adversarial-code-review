@@ -1,6 +1,6 @@
-# Adversarial Code Review
+# Agent Crucible
 
-Multi-agent adversarial code review for Claude Code. One agent implements, another actively tries to break it.
+Multi-agent code review with adversarial verification for Claude Code. One agent implements, another actively tries to break it.
 
 ## The Problem
 
@@ -8,7 +8,7 @@ You ask Claude Code to implement a feature. It writes 500 lines, runs the tests,
 
 **One AI agent reviewing its own work has blind spots.** It optimizes for "make the tests pass," not "find what could go wrong." It won't challenge its own assumptions.
 
-Adversarial Code Review solves this by pitting multiple Claude CLI instances against each other — one implements, another actively tries to break it. The implementer has to defend its code against a hostile reviewer. Bad code doesn't survive.
+Agent Crucible solves this by pitting multiple Claude CLI instances against each other — one implements, another actively tries to break it. The implementer has to defend its code against a hostile reviewer. Bad code doesn't survive.
 
 ## How It Works
 
@@ -27,7 +27,7 @@ The key insight: **the Reviewer is adversarial**. It doesn't just check "do test
 
 ## Why Multiple Agents?
 
-| Single Claude CLI | Adversarial Code Review |
+| Single Claude CLI | Agent Crucible |
 |---|---|
 | Reviews its own code (blind spots) | Separate reviewer with fresh context |
 | One long context window (polluted) | Isolated contexts per role |

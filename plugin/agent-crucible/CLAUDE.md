@@ -1,18 +1,15 @@
-# Adversarial Code Review Plugin
+# Agent Crucible Plugin
 
-This plugin provides multi-agent adversarial code review capabilities.
+Multi-agent code review with adversarial verification for Claude Code.
 
 ## What It Does
 
-When you need to review code with adversarial verification:
 1. One agent implements the code
 2. Another agent actively tries to break it
 3. The implementer must defend against challenges
 4. This cycle repeats until verification passes
 
 ## Available Tools
-
-The following MCP tools are available:
 
 ### Core Tools
 - `crew_run(repo, goal, supervisor_mode)` — Start adversarial review
@@ -31,8 +28,6 @@ The following MCP tools are available:
 
 ## Worker Templates
 
-When spawning workers, you can use these predefined templates:
-
 | Template | Authority | Use Case |
 |----------|-----------|----------|
 | `targeted-code-editor` | source_write | Implementing code changes |
@@ -43,7 +38,7 @@ When spawning workers, you can use these predefined templates:
 | `backend-developer` | source_write | Backend changes |
 | `test-writer` | source_write | Writing tests |
 
-## Usage Examples
+## Usage
 
 ### Simple Review (Default Mode)
 ```
@@ -52,12 +47,14 @@ crew_run(repo="/path/to/project", goal="Add user authentication")
 
 ### Supervisor Mode (Direct Control)
 ```
-crew_run(repo="/path/to/project", goal="Add user authentication", supervisor_mode=True)
+crew_run(repo="/path/to/project", goal="Add user auth", supervisor_mode=True)
 ```
 
-Then use supervisor tools to directly control workers:
+Then orchestrate manually:
 ```
 crew_spawn(repo="/path", crew_id="crew-1", label="backend-developer", mission="Implement auth API")
 crew_observe(repo="/path", crew_id="crew-1", worker_id="worker-1")
 crew_challenge(crew_id="crew-1", summary="Missing input validation")
+crew_verify(crew_id="crew-1", command="pytest")
+crew_accept(crew_id="crew-1", summary="All tests pass")
 ```
