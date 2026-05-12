@@ -1,8 +1,7 @@
 {
   "mcpServers": {
-    "crew-crucible": {
-      "command": "python",
-      "args": ["-m", "codex_claude_orchestrator.mcp_server"],
+    "adversarial-code-review": {
+      "command": "acr-mcp",
       "env": {
         "V4_EVENT_STORE_BACKEND": "sqlite"
       }
