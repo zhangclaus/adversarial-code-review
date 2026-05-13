@@ -22,7 +22,7 @@ def _build_controller():
     recorder = CrewRecorder(state_root)
     event_store = build_v4_event_store(repo, readonly=False)
     blackboard = BlackboardStore(recorder, event_store=event_store)
-    session = NativeClaudeSession()
+    session = NativeClaudeSession(open_terminal_on_start=True)
     worktree_manager = WorktreeManager(state_root)
     pool = WorkerPool(
         recorder=recorder,
