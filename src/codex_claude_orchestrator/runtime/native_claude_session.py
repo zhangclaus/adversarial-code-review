@@ -61,8 +61,6 @@ class NativeClaudeSession:
         session = self._session_name_factory(worker_id)
         pane = f"{session}:claude.0"
         self._tmux_run(["new-session", "-d", "-s", session, "-c", str(repo_root), "-n", "claude"])
-        command = shlex.join(["script", "-q", str(transcript_path), "claude", self._initial_prompt(repo_root, role, instructions)])
-        self._tmux_run(["send-keys", "-t", pane, command, "C-m"])
         if self._open_terminal_on_start:
             self._open_terminal(session)
         return {
@@ -81,7 +79,12 @@ class NativeClaudeSession:
             f"When this turn is complete, print exactly: {marker}\n"
             "This turn marker overrides any earlier completion marker."
         )
-        self._tmux_run(["send-keys", "-t", terminal_pane, full_message, "C-m"])
+        # Use claude -p to skip trust prompts and execute turn
+        # Use bash -c with proper escaping to pass message to claude -p
+        # This works in tmux where piping doesn't work well
+        escaped_message = full_message.replace('"', '\\"').replace('\n', '\\n')
+        command = f'bash -c "claude -p \\"{escaped_message}\\""'
+        self._tmux_run(["send-keys", "-t", terminal_pane, command, "C-m"])
         return {"message": full_message, "marker": marker}
 
     def observe(self, *, terminal_pane: str, lines: int = 200, turn_marker: str | None = None) -> dict:
