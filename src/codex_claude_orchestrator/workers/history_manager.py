@@ -22,7 +22,6 @@ class HistoryManager:
     """
 
     def __init__(self, *, work_dir: Path) -> None:
-        self._work_dir = work_dir
         self._history_dir = work_dir / ".crew-history"
         self._history_dir.mkdir(parents=True, exist_ok=True)
 
