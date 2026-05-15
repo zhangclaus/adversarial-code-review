@@ -795,3 +795,82 @@ def test_stop_worker_raises_on_missing_terminal_session(tmp_path: Path):
             crew_id=crew.crew_id,
             worker_id="worker-bad",
         )
+
+
+def test_observe_worker_saves_to_history(tmp_path: Path):
+    """observe_worker saves turn result and index when marker is seen and result exists."""
+    import json
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    recorder = CrewRecorder(repo_root / ".orchestrator")
+    crew = CrewRecord(crew_id="crew-1", root_goal="Goal", repo=repo_root)
+    recorder.start_crew(crew)
+    recorder.append_worker(
+        crew.crew_id,
+        WorkerRecord(
+            worker_id="worker-explorer",
+            crew_id=crew.crew_id,
+            role=WorkerRole.EXPLORER,
+            agent_profile="claude",
+            native_session_id="native-1",
+            terminal_session="session-1",
+            terminal_pane="session-1:claude.0",
+            transcript_artifact="workers/worker-explorer/transcript.txt",
+            turn_marker="marker",
+            workspace_mode=WorkspaceMode.READONLY,
+            workspace_path=str(repo_root),
+            work_dir=str(work_dir),
+            status=WorkerStatus.RUNNING,
+        ),
+    )
+    recorder.update_crew(crew.crew_id, {"active_worker_ids": ["worker-explorer"]})
+
+    class ResultNativeSession(FakeNativeSession):
+        def observe(self, **kwargs):
+            return {
+                "snapshot": "done",
+                "marker_seen": True,
+                "marker": kwargs.get("turn_marker", "marker"),
+                "result": {
+                    "status": "completed",
+                    "summary": "Implemented feature X",
+                    "changed_files": ["src/app.py"],
+                },
+            }
+
+    pool = WorkerPool(
+        recorder=recorder,
+        blackboard=BlackboardStore(recorder),
+        worktree_manager=FakeWorktreeManager(),
+        native_session=ResultNativeSession(),
+    )
+
+    observation = pool.observe_worker(
+        repo_root=repo_root,
+        crew_id=crew.crew_id,
+        worker_id="worker-explorer",
+    )
+
+    assert observation["marker_seen"] is True
+
+    # Verify history files were created
+    history_dir = work_dir / ".crew-history"
+    assert history_dir.exists()
+    assert (history_dir / "turn-1-result.json").exists()
+    assert (history_dir / "index.md").exists()
+
+    # Verify the result file content
+    result_data = json.loads((history_dir / "turn-1-result.json").read_text())
+    assert result_data["status"] == "completed"
+    assert result_data["summary"] == "Implemented feature X"
+    assert result_data["changed_files"] == ["src/app.py"]
+
+    # Verify index.md content
+    index_content = (history_dir / "index.md").read_text()
+    assert "Implemented feature X" in index_content
+    assert "completed" in index_content
+    assert "src/app.py" in index_content

@@ -34,6 +34,7 @@ from codex_claude_orchestrator.messaging.protocol_requests import ProtocolReques
 from codex_claude_orchestrator.workspace.worktree_manager import WorktreeManager
 from codex_claude_orchestrator.crew.scope import scope_covers_all as _scope_covers_all
 from codex_claude_orchestrator.v4.domain_events import DomainEventEmitter
+from codex_claude_orchestrator.workers.history_manager import HistoryManager
 
 
 class WorkerPool:
@@ -293,6 +294,22 @@ class WorkerPool:
         )
         self._recorder.append_event(crew_id, event)
         self._recorder.update_worker(crew_id, worker_id, {"last_seen_at": utc_now()})
+
+        # Save turn history if marker was seen and a result is available.
+        if observation.get("marker_seen", False) and observation.get("result") is not None:
+            work_dir_str = worker.get("work_dir", "")
+            if work_dir_str:
+                work_dir = Path(work_dir_str)
+                hm = HistoryManager(work_dir=work_dir)
+                turn_number = len(hm.list_turns()) + 1
+                task_description = worker.get("label") or worker.get("role", "unknown")
+                self._save_turn_history(
+                    work_dir=work_dir,
+                    turn_number=turn_number,
+                    task_description=task_description,
+                    result=observation["result"],
+                )
+
         return {
             **observation,
             "message_blocks": [message.to_dict() for message in message_blocks],
@@ -531,6 +548,24 @@ class WorkerPool:
                     status=response_status,
                     reason=message.body,
                 )
+
+    def _save_turn_history(
+        self,
+        *,
+        work_dir: Path,
+        turn_number: int,
+        task_description: str,
+        result: dict,
+    ) -> None:
+        hm = HistoryManager(work_dir=work_dir)
+        hm.save_turn_result(turn_number=turn_number, result=result)
+        hm.update_index(
+            turn_number=turn_number,
+            task=task_description,
+            status=result.get("status", "unknown"),
+            summary=result.get("summary", ""),
+            changed_files=result.get("changed_files", []),
+        )
 
     def _task_for_contract(self, crew_id: str, contract: WorkerContract) -> CrewTaskRecord:
         role = WorkerRole.IMPLEMENTER
