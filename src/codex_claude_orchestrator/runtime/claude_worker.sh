@@ -105,5 +105,4 @@ SYSTEM_PROMPT=$(cat "$SYSTEM_PROMPT_FILE")
 exec claude \
     --dangerously-skip-permissions \
     --system-prompt "$SYSTEM_PROMPT" \
-    --print \
     "$INITIAL_MESSAGE"
